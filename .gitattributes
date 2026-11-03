@@ -1,0 +1,4 @@
+* text=auto eol=lf
+*.vi binary
+*.ctl binary
+*.lvproj text
