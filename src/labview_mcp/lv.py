@@ -73,9 +73,13 @@ def check_vi_path(path: str) -> str:
         raise LabVIEWError(f"Use an absolute path: {path}")
     if p.suffix.lower() not in VI_SUFFIXES:
         raise LabVIEWError(f"Not a LabVIEW VI/control file ({', '.join(sorted(VI_SUFFIXES))}): {path}")
-    if not p.is_file():
-        raise LabVIEWError(f"File not found: {path}")
-    return str(p.resolve())
+    if p.is_file():
+        return str(p.resolve())
+    # VIs inside an LLB (LabVIEW library file): C:\dir\lib.llb\name.vi
+    llb = next((q for q in p.parents if q.suffix.lower() == ".llb"), None)
+    if llb is not None and llb.is_file():
+        return str(p)
+    raise LabVIEWError(f"File not found: {path}")
 
 
 class LabVIEW:
