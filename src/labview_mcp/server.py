@@ -1,4 +1,4 @@
-"""labview-mcp: MCP server that lets coding agents read and run LabVIEW VIs."""
+"""labview-mcp: MCP server that lets coding agents read, run and create LabVIEW VIs."""
 from __future__ import annotations
 
 import asyncio
@@ -23,6 +23,9 @@ mcp = MCPServer(
         "To understand a VI: start with vi_info, then vi_text (labels, comments, case names, "
         "front-panel controls as text), and use vi_snapshot to SEE the block diagram when wiring "
         "matters. vi_snapshot(all_frames=true) also renders hidden case/sequence frames.\n"
+        "To build a new VI: vi_create with a spec of controls, indicators, constants, functions, "
+        "subVIs and wires; check the returned diagram picture, then test with vi_run.
+"
         "All paths must be absolute. vi_run executes code on the user's machine and may drive "
         "real instruments; only run VIs the user asked you to run."
     ),
@@ -132,6 +135,45 @@ async def vi_run(
     A VI still running after timeout_s is aborted (typical for UI loops waiting on a Stop button).
     WARNING: executes code and may drive real hardware — only run VIs the user asked to run."""
     return await _run(lv.vi_run, path, inputs or {}, outputs, timeout_s)
+
+
+@mcp.tool(structured_output=False)
+async def vi_create(
+    path: str,
+    spec: dict[str, Any],
+    overwrite: bool = False,
+    description: str = "",
+) -> list[Any]:
+    """Create a new VI with front-panel controls/indicators and a wired block diagram.
+    Returns a summary and a picture of the generated diagram; then use vi_run to test it.
+
+    spec = {
+      "controls":   [{"name": "x", "type": "dbl", "label": "x", "default": 1.0}, ...],
+      "indicators": [{"name": "result", "type": "dbl"}],
+      "constants":  [{"name": "k", "type": "dbl", "value": 2.5}],
+      "functions":  [{"name": "add", "function": "Add"}],      # palette names: Add, Multiply,
+                    # Subtract, Divide, Concatenate Strings, Build Array, Index Array, ...
+      "subvis":     [{"name": "s", "path": "C:\\\\abs\\\\Helper.vi"}],
+      "wires":      [["x", "add.x"], ["k", "add.y"], ["add.x+y", "result"]]
+    }
+    names are ids ([A-Za-z_][A-Za-z0-9_]*). Wires go [from, to]. Controls, indicators and
+    constants are referenced by name alone; functions and subVIs as "name.Terminal", where the
+    terminal is its Context Help label (Add: x, y, x+y; Multiply: x, y, x*y) or, for a subVI,
+    the label of its control/indicator.
+    Types: dbl, sgl, i8..i64, u8..u64, bool, string, path; arrays "dbl[]", "string[][]";
+    clusters {"cluster": [{"name": "a", "type": "dbl"}, ...]}.
+    Loops and case structures are not supported yet."""
+    res = await _run(lv.vi_create, path, spec, overwrite, description)
+    text, imgs = await _run(lv.vi_snapshot, res["path"], False, True, False, False)
+    out: list[Any] = [
+        f"Created {res['path']} (state: {res['exec_state']}).\n"
+        f"Front panel: {res['front_panel']}\n"
+        "Check the diagram picture: a wire that LabVIEW could not connect is simply missing. "
+        "Then call vi_run to test."
+    ]
+    for p in imgs[:1]:
+        out.append(_image(p, 2000))
+    return out
 
 
 def main() -> None:

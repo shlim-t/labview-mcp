@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "labview-mcp"
-version = "0.0.1"
-description = "MCP server that lets AI coding agents (Claude Code, Codex, Cursor...) read, render and run NI LabVIEW VIs"
+version = "0.1.0"
+description = "MCP server that lets AI coding agents (Claude Code, Codex, Cursor...) read, render, run and create NI LabVIEW VIs"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"

@@ -273,8 +273,79 @@ class LabVIEW:
             res["unreadable"] = errors
         return res
 
+    def vi_create(self, path: str, spec: dict, overwrite: bool, description: str) -> dict:
+        from . import gen
+
+        script = gen.build(spec)  # validates before LabVIEW is touched
+        p = Path(path).expanduser()
+        if not p.is_absolute() or p.suffix.lower() != ".vi":
+            raise LabVIEWError(f"path must be an absolute path ending in .vi: {path}")
+        if not p.parent.is_dir():
+            raise LabVIEWError(f"folder does not exist: {p.parent}")
+        if p.exists() and not overwrite:
+            raise LabVIEWError(f"{p} already exists (pass overwrite=true to replace it)")
+        if not BOOTSTRAP_VI.exists() or not BLANK_VI.exists():
+            raise LabVIEWError(f"helper VIs missing from the package: {VIS_DIR}")
+        shutil.copyfile(BLANK_VI, p)
+        target = self._vi(str(p))
+        if Path(target.Path).resolve() != p.resolve():
+            raise LabVIEWError(f"a different VI named {p.name} is already in LabVIEW's memory "
+                               f"({target.Path}); pick another file name")
+        target._FlagAsMethod("SaveInstrument")
+        boot = self._vi(str(BOOTSTRAP_VI))
+        boot.SetControlValue("reference", target)
+        boot.SetControlValue("XML Script Commands", script.xml)
+        boot.SetControlValue("Type Strings", _byte_strings(script.type_strings))
+        boot.SetControlValue("Data Strings", _byte_strings(script.data_strings))
+        boot.Run(False)
+        status, code, source = boot.GetControlValue("error out")
+        if status:
+            hint = _GEN_ERRORS.get(code, "")
+            raise LabVIEWError(
+                f"LabVIEW rejected the diagram (error {code}){': ' + hint if hint else ''}. "
+                f"The file {p} was left as an empty VI.\nLabVIEW said: {_strip_html(str(source))}")
+        if script.defaults:
+            # LabVIEW's scripting ignores the data for controls, so set the values and
+            # make them the defaults.
+            for label, value in script.defaults.items():
+                try:
+                    target.SetControlValue(label, value)
+                except pywintypes.com_error as e:
+                    raise LabVIEWError(f"cannot set default of '{label}' to {value!r}: {_com_msg(e)}") from None
+            target._FlagAsMethod("MakeCurValueDefault")
+            target.MakeCurValueDefault()
+        _try(lambda: setattr(target, "FPWinTitle", p.stem))  # blank template carries its own title
+        if description:
+            target.Description = description
+        target.SaveInstrument(str(p), False, False)
+        return {
+            "path": str(p),
+            "exec_state": EXEC_STATES.get(target.ExecState, target.ExecState),
+            "front_panel": script.labels,
+            "script_xml": script.xml,
+        }
+
+
+VIS_DIR = Path(__file__).parent / "vis"
+BOOTSTRAP_VI = VIS_DIR / "lvmcp_gen_script.vi"
+BLANK_VI = VIS_DIR / "lvmcp_blank.vi"
+_GEN_ERRORS = {
+    1063: "a wire names a terminal that does not exist on that node (terminal names are the "
+          "labels shown in Context Help, or the subVI's control/indicator labels)",
+    1374: "unknown function name or bad attribute in the generated script",
+    1055: "invalid object reference",
+}
+
 
 # ---- helpers --------------------------------------------------------------
+def _byte_strings(items: list[bytes]):
+    """A LabVIEW string array whose elements carry raw bytes. Each element is sent as a COM byte
+    array (VT_UI1) so it bypasses the code-page conversion applied to text."""
+    from win32com.client import VARIANT
+    return VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_VARIANT,
+                   [VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_UI1, b) for b in items])
+
+
 def _try(fn, default=None):
     try:
         return fn()
