@@ -4,7 +4,7 @@ An [MCP](https://modelcontextprotocol.io) server that lets AI coding agents — 
 
 LabVIEW source code is a binary, graphical format. Text-based coding agents can't open a `.vi` file. labview-mcp acts as the agent's eyes and hands: it drives your installed LabVIEW over its ActiveX server and returns what the agent needs as text, images, and values.
 
-> Status: **v0.1.0.** Reading and running work on any VI. Creating VIs works for straight-line diagrams (controls, constants, functions, subVIs, wires); loops and case structures are next.
+> Status: **v0.2.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth.
 
 ## What the agent can do
 
@@ -16,7 +16,7 @@ LabVIEW source code is a binary, graphical format. Text-based coding agents can'
 | `vi_snapshot` | PNG images of the block diagram, front panel, or connector pane. `all_frames=true` renders **every hidden case, sequence, and event frame**. |
 | `vi_hierarchy` | The subVI call tree. vi.lib, user.lib, and instr.lib are hidden by default. |
 | `vi_run` | Sets inputs, runs the VI, and returns all front-panel values. Stops VIs that don't finish within the time limit (UI loops). |
-| `vi_create` | **Builds a new VI** from a JSON spec: typed controls and indicators with defaults, constants, palette functions, subVI calls, and wires. Returns a picture of the generated diagram. |
+| `vi_create` | **Builds a new VI** from a JSON spec: typed controls and indicators with defaults, constants, palette functions, subVI calls, For/While loops, shift registers, case structures, and wires. LabVIEW's Clean Up Diagram tidies the result, and the tool returns a picture of it. |
 
 Example prompts:
 
@@ -40,6 +40,28 @@ Example prompts:
                  ["readings", "sum.numeric array"], ["sum.sum", "total"]]
 }
 ```
+
+Loops and case structures go in `"structures"` and can hold their own constants, functions, subVIs, and structures. This spec sums 0..n-1 with a shift register:
+
+```json
+{
+  "controls":   [{"name": "n", "type": "i32", "default": 5}],
+  "indicators": [{"name": "total", "type": "i32"}],
+  "constants":  [{"name": "zero", "type": "i32", "value": 0}],
+  "structures": [{"name": "L", "type": "for_loop", "shift_registers": ["acc"],
+                  "functions": [{"name": "a", "function": "Add"}]}],
+  "wires": [["n", "L.N"], ["zero", "acc.left"], ["acc.left", "a.x"], ["L.i", "a.y"],
+            ["a.x+y", "acc.right"], ["acc.right", "total"]]
+}
+```
+
+| Structure | Spec | Terminals |
+|---|---|---|
+| For Loop | `{"type": "for_loop", "shift_registers": ["acc"], ...}` | `L.N`, `L.i`, `acc.left`, `acc.right` |
+| While Loop | `{"type": "while_loop", "stop_if_true": true, ...}` | `W.i`, `W.stop` |
+| Case | `{"type": "case", "output_tunnels": ["t"], "cases": [{"value": true, ...}, {"default": true, ...}]}` | `C.selector`, tunnel `t` |
+
+Wire straight across structure borders and LabVIEW adds the tunnels. For Loops build arrays from values that leave them, and While Loops pass out the last value. Each frame of a case wires its result to an output tunnel.
 
 Types: `dbl sgl i8 i16 i32 i64 u8 u16 u32 u64 bool string path`, arrays (`"dbl[]"`, `"i32[][]"`), and clusters (`{"cluster": [{"name": "gain", "type": "dbl"}, ...]}`). Function terminals use the names shown in LabVIEW's Context Help. SubVI terminals use the subVI's control labels.
 
@@ -85,7 +107,8 @@ agent ──MCP/stdio──▶ labview-mcp ──ActiveX (COM)──▶ LabVIEW.
 - [ ] `vi_diff`: a semantic diff between two versions of a VI, for code review on binary files.
 - [ ] LabVIEWCLI tools: build specs, mass compile, VI Analyzer, unit tests.
 - [x] `vi_create`: new VIs with controls, constants, functions, subVIs, and wires.
-- [ ] `vi_create`: For/While loops, case structures, shift registers; visible labels; connector pane.
+- [x] `vi_create`: For/While loops, shift registers, case structures (boolean, integer, string), nesting.
+- [ ] `vi_create`: visible labels, constant widths, connector pane, event structures, enums.
 - [ ] Helper VIs saved for older LabVIEW versions.
 - [ ] Scripted edits: duplicate a case, set constants, rename, create globals. Each edit makes a backup first.
 

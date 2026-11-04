@@ -174,9 +174,32 @@ def parse_type(t: Any) -> LVType:
     return LVType("array", elem=base, dims=dims) if dims else base
 
 
+
+
 # ---- spec -> XML -------------------------------------------------------------
 _NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
-_TERM_BAD = re.compile(r"[<>\"&:\x00-\x1f]")
+# ":" in a terminal reference has crashed LabVIEW; everything else is XML-escaped.
+_TERM_BAD = re.compile(r"[:\x00-\x1f]")
+_CONTENT_KEYS = ("constants", "functions", "subvis", "structures")
+_STRUCT_TYPES = {"for_loop": "for", "for": "for", "while_loop": "while", "while": "while",
+                 "case": "case", "case_structure": "case"}
+# Friendly names for structure terminals -> LabVIEW's names.
+_STRUCT_TERMS = {
+    "for": {"N": "Loop Count", "count": "Loop Count", "i": "Loop Counter", "iteration": "Loop Counter",
+            "Loop Count": "Loop Count", "Loop Counter": "Loop Counter"},
+    "while": {"i": "Loop Counter", "iteration": "Loop Counter", "stop": "Loop End Ref",
+              "condition": "Loop End Ref", "Loop Counter": "Loop Counter", "Loop End Ref": "Loop End Ref"},
+    "case": {"selector": "Case Selector", "Case Selector": "Case Selector"},
+}
+_LEAF_SIZE = {"constant": (70, 25), "function": (40, 40), "subvi": (40, 40),
+              "control": (50, 30), "indicator": (50, 30)}
+PAD_X, PAD_TOP, PAD_BOTTOM, GAP_X, GAP_Y = 50, 40, 50, 50, 30
+
+STRUCTURE_HELP = (
+    "structures: {\"name\": \"L\", \"type\": \"for_loop\" | \"while_loop\" | \"case\", ...contents}. "
+    "Loops hold constants/functions/subvis/structures and optional \"shift_registers\": [\"sr\"]; "
+    "while loops take \"stop_if_true\" (default true). A case holds \"cases\": [{\"value\": true | 3 | "
+    "\"apple\", \"default\": false, ...contents}] and optional \"output_tunnels\": [\"t\"].")
 
 
 @dataclass
@@ -188,108 +211,293 @@ class Script:
     defaults: dict[str, Any]  # front-panel label -> default value (set after generation)
 
 
+@dataclass
+class _Node:
+    name: str
+    kind: str        # control indicator constant function subvi for while case shiftreg tunnel
+    container: str   # id of the diagram/body/frame holding it ("" = top-level diagram)
+    spec: dict
+    owner: str = ""  # structure a shift register / tunnel belongs to
+
+
 def _pos(x, y) -> str:
     return f"({int(x)},{int(y)})"
+
+
+class _Builder:
+    def __init__(self):
+        self.nodes: dict[str, _Node] = {}
+        self.owner_of: dict[str, str] = {"": ""}        # container id -> owning structure name
+        self.children: dict[str, list[str]] = {"": []}  # container id -> node names, spec order
+        self.types: list[tuple[bytes, bytes]] = []
+
+    # -- collection
+    def add(self, name, kind, container, spec, owner=""):
+        if not isinstance(name, str) or not _NAME.match(name):
+            raise SpecError(f"{kind} name {name!r} must match [A-Za-z_][A-Za-z0-9_]* (it is an id, "
+                            "use 'label' for display text)")
+        if name in self.nodes:
+            raise SpecError(f"duplicate name {name!r}")
+        self.nodes[name] = _Node(name, kind, container, spec, owner)
+        if kind not in ("shiftreg", "tunnel"):
+            self.children[container].append(name)
+
+    def collect(self, d: dict, container: str):
+        for c in d.get("constants", []) or []:
+            self.add(c.get("name"), "constant", container, c)
+        for f in d.get("functions", []) or []:
+            self.add(f.get("name"), "function", container, f)
+            fn = f.get("function")
+            if not isinstance(fn, str) or not fn.strip() or _TERM_BAD.search(fn):
+                raise SpecError(f"function {f.get('name')!r} needs 'function': the palette name, e.g. \"Add\"")
+        for s in d.get("subvis", []) or []:
+            self.add(s.get("name"), "subvi", container, s)
+            if not isinstance(s.get("path"), str) or not s["path"].lower().endswith((".vi", ".vim")):
+                raise SpecError(f"subvi {s.get('name')!r} needs an absolute 'path' to a .vi")
+        for st in d.get("structures", []) or []:
+            self.collect_structure(st, container)
+
+    def collect_structure(self, st: dict, container: str):
+        if not isinstance(st, dict):
+            raise SpecError(f"bad structure {st!r}. {STRUCTURE_HELP}")
+        kind = _STRUCT_TYPES.get(str(st.get("type", "")).lower())
+        name = st.get("name")
+        if not kind:
+            raise SpecError(f"structure {name!r}: unknown type {st.get('type')!r}. {STRUCTURE_HELP}")
+        self.add(name, kind, container, st)
+        if kind in ("for", "while"):
+            allowed = {"name", "type", "shift_registers", "stop_if_true", *_CONTENT_KEYS}
+            self.owner_of[name] = name
+            self.children[name] = []
+            self.collect(st, name)
+            for sr in st.get("shift_registers", []) or []:
+                self.add(sr, "shiftreg", container, {}, owner=name)
+        else:
+            allowed = {"name", "type", "cases", "output_tunnels"}
+            cases = st.get("cases")
+            if not isinstance(cases, list) or not cases:
+                raise SpecError(f"case {name!r} needs \"cases\": [{{\"value\": ..., ...contents}}, ...]")
+            for i, fr in enumerate(cases):
+                if not isinstance(fr, dict):
+                    raise SpecError(f"case {name!r}: each entry of cases must be an object")
+                extra = set(fr) - {"value", "default", *_CONTENT_KEYS}
+                if extra:
+                    raise SpecError(f"case {name!r} frame {i}: unknown keys {sorted(extra)}")
+                if fr.get("value") is None and not fr.get("default"):
+                    raise SpecError(f"case {name!r} frame {i}: give a \"value\" or \"default\": true")
+                fid = f"{name}#{i}"
+                self.owner_of[fid] = name
+                self.children[fid] = []
+                self.collect(fr, fid)
+            for t in st.get("output_tunnels", []) or []:
+                self.add(t, "tunnel", container, {}, owner=name)
+        extra = set(st) - allowed
+        if extra:
+            raise SpecError(f"structure {name!r}: unknown keys {sorted(extra)}. {STRUCTURE_HELP}")
+
+    # -- wires
+    def resolve(self, end: str) -> str:
+        node, _, term = end.partition(".")
+        n = self.nodes.get(node)
+        if n is None:
+            raise SpecError(f"wire end {end!r}: no node named {node!r}")
+        if term and _TERM_BAD.search(term):
+            raise SpecError(f"wire end {end!r}: bad terminal name")
+        k = n.kind
+        if k in ("function", "subvi"):
+            if not term:
+                raise SpecError(f"wire end {end!r}: give the terminal, e.g. \"{node}.x\"")
+            return end
+        if k in _STRUCT_TERMS:
+            lv = _STRUCT_TERMS[k].get(term)
+            if not lv:
+                raise SpecError(f"wire end {end!r}: a {k} structure has terminals "
+                                f"{sorted(t for t in _STRUCT_TERMS[k] if ' ' not in t)}. To pass data "
+                                "in or out, wire the inner node directly; LabVIEW adds the tunnel")
+            return f"{node}.{lv}"
+        if k == "shiftreg":
+            side = {"left": "Left", "right": "Right"}.get(term.lower())
+            if not side:
+                raise SpecError(f"wire end {end!r}: wire shift registers as \"{node}.left\" (the value "
+                                f"from the previous iteration) or \"{node}.right\" (the value for the next)")
+            return f"{node}.{side}"
+        if term:
+            raise SpecError(f"wire end {end!r}: {k}s have one terminal, use just \"{node}\"")
+        return node
+
+    # -- layout
+    def item_in(self, name: str, container: str) -> str | None:
+        """The direct child of `container` that is or holds node `name`."""
+        n = self.nodes[name]
+        x = n.owner if n.kind in ("shiftreg", "tunnel") else name
+        c = self.nodes[x].container
+        while c != container:
+            if c == "":
+                return None
+            x = self.owner_of[c]
+            c = self.nodes[x].container
+        return x
+
+    def layout(self, container: str, wires):
+        items = self.children[container]
+        depth = {n: 0 for n in items}
+        edges = set()
+        for a, z in wires:
+            ia = self.item_in(a.partition(".")[0], container)
+            iz = self.item_in(z.partition(".")[0], container)
+            if ia and iz and ia != iz:
+                edges.add((ia, iz))
+        for _ in range(len(items)):
+            changed = False
+            for ia, iz in edges:
+                if depth[iz] < depth[ia] + 1 <= len(items):
+                    depth[iz], changed = depth[ia] + 1, True
+            if not changed:
+                break
+        if container == "":
+            for n in items:
+                k = self.nodes[n].kind
+                if k == "control":
+                    depth[n] = 0
+                elif k != "indicator":
+                    depth[n] += 1
+            last = max([depth[n] for n in items if self.nodes[n].kind != "indicator"] + [0]) + 1
+            for n in items:
+                if self.nodes[n].kind == "indicator":
+                    depth[n] = last
+        sizes = {n: self.size(n, wires) for n in items}
+        cols: dict[int, list[str]] = {}
+        for n in items:
+            cols.setdefault(depth[n], []).append(n)
+        rel, x, total_h = {}, 0, 0
+        for d in sorted(cols):
+            y = 0
+            for n in cols[d]:
+                rel[n] = (x, y)
+                y += sizes[n][1] + GAP_Y
+            total_h = max(total_h, y - GAP_Y)
+            x += max(sizes[n][0] for n in cols[d]) + GAP_X
+        return max(x - GAP_X, 0), total_h, rel
+
+    def bodies(self, name: str) -> list[str]:
+        n = self.nodes[name]
+        return [name] if n.kind in ("for", "while") else [f"{name}#{i}" for i in range(len(n.spec["cases"]))]
+
+    def size(self, name: str, wires) -> tuple[int, int]:
+        n = self.nodes[name]
+        if n.kind in _LEAF_SIZE:
+            return _LEAF_SIZE[n.kind]
+        w = h = 0
+        for b in self.bodies(name):
+            bw, bh, _ = self.layout(b, wires)
+            w, h = max(w, bw), max(h, bh)
+        side = sum(1 for m in self.nodes.values() if m.owner == name)
+        return (max(w + 2 * PAD_X, 160),
+                max(h + PAD_TOP + PAD_BOTTOM, 110, PAD_TOP + 30 * side + PAD_BOTTOM))
+
+    def place(self, container: str, origin, wires, out: dict):
+        """Rough positions; the helper VI runs LabVIEW's Clean Up Diagram afterwards."""
+        _, _, rel = self.layout(container, wires)
+        for n, (rx, ry) in rel.items():
+            ax, ay = origin[0] + rx, origin[1] + ry
+            out[n] = (ax, ay)
+            if self.nodes[n].kind in ("for", "while", "case"):
+                # A loop's contents are positioned relative to the loop; case frames share the
+                # coordinates of the diagram that holds the case.
+                inner = (PAD_X, PAD_TOP) if self.nodes[n].kind in ("for", "while") else (ax + PAD_X, ay + PAD_TOP)
+                for b in self.bodies(n):
+                    self.place(b, inner, wires, out)
+
+    # -- emit
+    def add_type(self, t, value=None) -> int:
+        lt = parse_type(t)
+        self.types.append((lt.td(), lt.data(value)))
+        return len(self.types) - 1
+
+    def emit(self, container: str, pos, wires, out: list):
+        for name in self.children[container]:
+            n = self.nodes[name]
+            p = _pos(*pos[name])
+            if n.kind == "constant":
+                ti = self.add_type(n.spec.get("type", "dbl"), n.spec.get("value"))
+                out.append(f"<Constant name={quoteattr(name)} typeindex=\"{ti}\" position=\"{p}\"></Constant>")
+            elif n.kind == "function":
+                out.append(f"<Function name={quoteattr(name)} style={quoteattr(n.spec['function'].strip())} "
+                           f"position=\"{p}\"></Function>")
+            elif n.kind == "subvi":
+                out.append(f"<SubVI name={quoteattr(name)} path={quoteattr(n.spec['path'])} "
+                           f"position=\"{p}\"></SubVI>")
+            elif n.kind in ("for", "while", "case"):
+                w, h = self.size(name, wires)
+                side = [m for m in self.nodes.values() if m.owner == name]
+                if n.kind == "case":
+                    out.append(f"<MultiframeStructure name={quoteattr(name)} style=\"Case Structure\" "
+                               f"position=\"{p}\" width=\"{w}\" height=\"{h}\">")
+                    for i, fr in enumerate(n.spec["cases"]):
+                        val = fr.get("value")
+                        if isinstance(val, bool):
+                            val = "True" if val else "False"
+                        val = "Default" if val is None else str(val)
+                        out.append(f"<Frame name={quoteattr(f'{name}_frame{i}')} value={quoteattr(val)} "
+                                   f"index=\"{i}\"" + (" default=\"TRUE\"" if fr.get("default") else "") + ">")
+                        self.emit(f"{name}#{i}", pos, wires, out)
+                        out.append("</Frame>")
+                    for k, t in enumerate(side):
+                        out.append(f"<Tunnel name={quoteattr(t.name)} location=\"right\" "
+                                   f"offset=\"{PAD_TOP + 30 * k}\"></Tunnel>")
+                    out.append("</MultiframeStructure>")
+                else:
+                    style = "For Loop" if n.kind == "for" else "While Loop"
+                    cond = ""
+                    if n.kind == "while":
+                        cond = " loopCondition=\"" + ("Stop if True" if n.spec.get("stop_if_true", True)
+                                                     else "Continue if True") + "\""
+                    out.append(f"<Structure name={quoteattr(name)} style=\"{style}\" position=\"{p}\" "
+                               f"width=\"{w}\" height=\"{h}\"{cond}>")
+                    self.emit(name, pos, wires, out)
+                    for k, sr in enumerate(side):
+                        out.append(f"<ShiftRegister name={quoteattr(sr.name)} location=\"left\" "
+                                   f"offset=\"{PAD_TOP + 30 * k}\"></ShiftRegister>")
+                    out.append("</Structure>")
 
 
 def build(spec: dict) -> Script:
     if not isinstance(spec, dict):
         raise SpecError("spec must be an object")
-    unknown = set(spec) - {"controls", "indicators", "constants", "functions", "subvis", "wires"}
+    unknown = set(spec) - {"controls", "indicators", "wires", *_CONTENT_KEYS}
     if unknown:
         raise SpecError(f"unknown spec keys: {sorted(unknown)}")
-
-    names: dict[str, str] = {}
-    types: list[tuple[bytes, bytes]] = []
-
-    def add_name(n, kind):
-        if not isinstance(n, str) or not _NAME.match(n):
-            raise SpecError(f"{kind} name {n!r} must match [A-Za-z_][A-Za-z0-9_]* (it is an id, "
-                            "use 'label' for display text)")
-        if n in names:
-            raise SpecError(f"duplicate name {n!r}")
-        names[n] = kind
-
-    def add_type(t, value=None) -> int:
-        lt = parse_type(t)
-        types.append((lt.td(), lt.data(value)))
-        return len(types) - 1
-
-    controls = [dict(c, _ind=False) for c in spec.get("controls", [])] + \
-               [dict(c, _ind=True) for c in spec.get("indicators", [])]
-    labels = {}
-    defaults = {}
+    b = _Builder()
+    controls = [dict(c, _ind=False) for c in spec.get("controls", []) or []] + \
+               [dict(c, _ind=True) for c in spec.get("indicators", []) or []]
+    labels, defaults = {}, {}
     for c in controls:
-        add_name(c.get("name"), "indicator" if c["_ind"] else "control")
+        b.add(c.get("name"), "indicator" if c["_ind"] else "control", "", c)
         labels[c["name"]] = str(c.get("label") or c["name"])
         if c.get("default") is not None:
             if c["_ind"]:
                 raise SpecError(f"indicator {c['name']!r} cannot have a default")
             defaults[labels[c["name"]]] = c["default"]
-    for c in spec.get("constants", []):
-        add_name(c.get("name"), "constant")
-    for f in spec.get("functions", []):
-        add_name(f.get("name"), "function")
-        if not isinstance(f.get("function"), str) or not f["function"].strip() or _TERM_BAD.search(f["function"]):
-            raise SpecError(f"function {f['name']!r} needs 'function': the palette name, e.g. \"Add\"")
-    for s in spec.get("subvis", []):
-        add_name(s.get("name"), "subvi")
-        if not isinstance(s.get("path"), str) or not s["path"].lower().endswith((".vi", ".vim")):
-            raise SpecError(f"subvi {s['name']!r} needs an absolute 'path' to a .vi")
-
-    if not (spec.get("constants") or spec.get("functions") or spec.get("subvis")):
+    b.collect(spec, "")
+    if not any(n.kind not in ("control", "indicator") for n in b.nodes.values()):
         # A diagram holding only terminals is saved by LabVIEW as a file it cannot reopen.
-        raise SpecError("the diagram needs at least one constant, function or subVI")
+        raise SpecError("the diagram needs at least one constant, function, subVI or structure")
 
     wires = []
-    for w in spec.get("wires", []):
+    for w in spec.get("wires", []) or []:
         if isinstance(w, dict):
             w = [w.get("from"), w.get("to")]
         if not (isinstance(w, (list, tuple)) and len(w) == 2 and all(isinstance(x, str) for x in w)):
             raise SpecError(f"wire {w!r} must be [\"from\", \"to\"]")
-        for end in w:
-            node, _, term = end.partition(".")
-            if node not in names:
-                raise SpecError(f"wire end {end!r}: no node named {node!r}")
-            kind = names[node]
-            if kind in ("function", "subvi") and not term:
-                raise SpecError(f"wire end {end!r}: give the terminal, e.g. \"{node}.x\"")
-            if kind not in ("function", "subvi") and term:
-                raise SpecError(f"wire end {end!r}: {kind}s have one terminal, use just \"{node}\"")
-            if term and _TERM_BAD.search(term):
-                raise SpecError(f"wire end {end!r}: bad terminal name")
-        wires.append(w)
+        wires.append((b.resolve(w[0]), b.resolve(w[1])))
 
-    # -- layout: columns by dataflow depth
-    depth = {n: 0 for n in names}
-    for c in controls:
-        if c["_ind"]:
-            depth[c["name"]] = 0
-    for _ in range(len(names)):
-        changed = False
-        for a, b in wires:
-            na, nb = a.partition(".")[0], b.partition(".")[0]
-            if depth[nb] < depth[na] + 1 and depth[na] + 1 < len(names) + 1:
-                depth[nb] = depth[na] + 1
-                changed = True
-        if not changed:
-            break
-    maxd = max([depth[n] for n in names if names[n] != "indicator"] + [0])
-    for c in controls:
-        if c["_ind"]:
-            depth[c["name"]] = maxd + 1
-    rows: dict[int, int] = {}
-    pos = {}
-    for n in names:
-        d = depth[n]
-        r = rows.get(d, 0)
-        rows[d] = r + 1
-        pos[n] = (30 + d * 150, 30 + r * 70)
+    pos: dict[str, tuple[int, int]] = {}
+    b.place("", (30, 30), wires, pos)
 
     out = ["<Script>"]
     fp_rows = {False: 0, True: 0}
     for c in controls:
-        ti = add_type(c.get("type", "dbl"), c.get("default"))
+        ti = b.add_type(c.get("type", "dbl"), c.get("default"))
         n = c["name"]
         r = fp_rows[c["_ind"]]
         fp_rows[c["_ind"]] += 1
@@ -298,23 +506,15 @@ def build(spec: dict) -> Script:
                    + (" indicator=\"TRUE\"" if c["_ind"] else "")
                    + f" label={quoteattr(labels[n])} position=\"{_pos(*fp)}\"></Control>")
         out.append(f"<ControlTerminal controlname={quoteattr(n)} position=\"{_pos(*pos[n])}\"></ControlTerminal>")
-    for c in spec.get("constants", []):
-        ti = add_type(c.get("type", "dbl"), c.get("value"))
-        out.append(f"<Constant name={quoteattr(c['name'])} typeindex=\"{ti}\" position=\"{_pos(*pos[c['name']])}\"></Constant>")
-    for f in spec.get("functions", []):
-        out.append(f"<Function name={quoteattr(f['name'])} style={quoteattr(f['function'].strip())} "
-                   f"position=\"{_pos(*pos[f['name']])}\"></Function>")
-    for s in spec.get("subvis", []):
-        out.append(f"<SubVI name={quoteattr(s['name'])} path={quoteattr(s['path'])} "
-                   f"position=\"{_pos(*pos[s['name']])}\"></SubVI>")
+    b.emit("", pos, wires, out)
     # LabVIEW's scripting resolves a wire from its sink: source = where data goes, destination = driver.
-    for a, b in wires:
-        out.append(f"<Wire source={quoteattr(b)} destination={quoteattr(a)}></Wire>")
+    for a, z in wires:
+        out.append(f"<Wire source={quoteattr(z)} destination={quoteattr(a)}></Wire>")
     out.append("</Script>")
     return Script(
         xml="\n".join(out),
-        type_strings=[t for t, _ in types],
-        data_strings=[d for _, d in types],
+        type_strings=[t for t, _ in b.types],
+        data_strings=[d for _, d in b.types],
         labels=labels,
         defaults=defaults,
     )

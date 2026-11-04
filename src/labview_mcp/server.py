@@ -162,7 +162,26 @@ async def vi_create(
     the label of its control/indicator.
     Types: dbl, sgl, i8..i64, u8..u64, bool, string, path; arrays "dbl[]", "string[][]";
     clusters {"cluster": [{"name": "a", "type": "dbl"}, ...]}.
-    Loops and case structures are not supported yet."""
+
+    Structures (top level or nested, in "structures"; they hold constants/functions/subvis/
+    structures of their own; all names are global and wires are always listed at the top level):
+      {"name": "L", "type": "for_loop", "functions": [...], "shift_registers": ["acc"]}
+          terminals L.N (count), L.i; shift register: acc.left (previous value), acc.right (next)
+      {"name": "W", "type": "while_loop", "stop_if_true": true, ...}   terminals W.i, W.stop
+      {"name": "C", "type": "case", "output_tunnels": ["t"], "cases": [
+          {"value": true, ...contents}, {"value": 3}, {"value": "apple"}, {"default": true}]}
+          terminal C.selector. Values passing INTO a structure: wire the outer node straight to the
+          inner node. Values leaving a loop: wire the inner node to the outer node (For Loops build
+          an array, While Loops pass the last value). Values leaving a case: wire each frame's
+          result to an output tunnel ("t"), then "t" to the destination.
+    Example, sum of 0..n-1:
+      {"controls": [{"name": "n", "type": "i32"}], "indicators": [{"name": "total", "type": "i32"}],
+       "constants": [{"name": "zero", "type": "i32", "value": 0}],
+       "structures": [{"name": "L", "type": "for_loop", "shift_registers": ["acc"],
+                       "functions": [{"name": "a", "function": "Add"}]}],
+       "wires": [["n", "L.N"], ["zero", "acc.left"], ["acc.left", "a.x"], ["L.i", "a.y"],
+                 ["a.x+y", "acc.right"], ["acc.right", "total"]]}
+    The diagram is tidied with LabVIEW's Clean Up Diagram."""
     res = await _run(lv.vi_create, path, spec, overwrite, description)
     text, imgs = await _run(lv.vi_snapshot, res["path"], False, True, False, False)
     out: list[Any] = [
