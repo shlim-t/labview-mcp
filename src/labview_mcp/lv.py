@@ -18,6 +18,7 @@ from typing import Any, Callable
 import pythoncom
 import pywintypes
 import win32com.client
+from xml.sax.saxutils import quoteattr
 
 try:  # surface our errors to the agent as normal tool errors, not hidden crashes
     from mcp.server.mcpserver.exceptions import ToolError as _Base
@@ -292,13 +293,7 @@ class LabVIEW:
             raise LabVIEWError(f"a different VI named {p.name} is already in LabVIEW's memory "
                                f"({target.Path}); pick another file name")
         target._FlagAsMethod("SaveInstrument")
-        boot = self._vi(str(BOOTSTRAP_VI))
-        boot.SetControlValue("reference", target)
-        boot.SetControlValue("XML Script Commands", script.xml)
-        boot.SetControlValue("Type Strings", _byte_strings(script.type_strings))
-        boot.SetControlValue("Data Strings", _byte_strings(script.data_strings))
-        boot.Run(False)
-        status, code, source = boot.GetControlValue("error out")
+        status, code, source = self._gen_script(target, script.xml, script.type_strings, script.data_strings)
         if status:
             hint = _GEN_ERRORS.get(code, "")
             raise LabVIEWError(
@@ -326,13 +321,93 @@ class LabVIEW:
             "script_xml": script.xml,
         }
 
+    def _gen_script(self, target, xml: str, type_strings: list[bytes], data_strings: list[bytes]):
+        boot = self._vi(str(BOOTSTRAP_VI))
+        boot.SetControlValue("reference", target)
+        boot.SetControlValue("XML Script Commands", xml)
+        boot.SetControlValue("Type Strings", _byte_strings(type_strings))
+        boot.SetControlValue("Data Strings", _byte_strings(data_strings))
+        boot.Run(False)
+        return boot.GetControlValue("error out")
+
+    def _probe_vi(self):
+        """A scratch VI kept in memory (never saved) for probing terminal names."""
+        if getattr(self, "_probe", None) is None:
+            p = self._scratch("probe") / "lvmcp_probe.vi"
+            shutil.copyfile(BLANK_VI, p)
+            self._probe = self._vi(str(p))
+            self._probe_n = 0
+        return self._probe
+
+    def lv_functions(self, query: str) -> dict:
+        from . import catalog
+        names = catalog.search(self.app.ApplicationDirectory, query)
+        return {"query": query, "functions": names,
+                "note": "Names come from LabVIEW's Context Help. Use function_terminals(name) to get "
+                        "the exact terminal names for wiring."}
+
+    def function_terminals(self, name: str, size: int | None = None) -> dict:
+        from . import catalog
+        labels = catalog.load(self.app.ApplicationDirectory).get(name)
+        if labels is None:
+            hits = catalog.search(self.app.ApplicationDirectory, name, 10)
+            raise LabVIEWError(f"no function named {name!r} in LabVIEW's help catalog. Close matches: {hits}")
+        if size is not None and not (isinstance(size, int) and 1 <= size <= 100):
+            raise LabVIEWError("size must be an integer 1..100")
+        cache = self.__dict__.setdefault("_term_cache", {})
+        if (name, size) in cache:
+            return cache[(name, size)]
+        vi = self._probe_vi()
+        if size is None:
+            node = lambda k: f"<Function name=\"f{k}\" style={quoteattr(name)} position=\"(0,0)\"></Function>"
+        else:
+            tag = "BuildArray" if name.lower() == "build array" else "GrowableFunction"
+            node = lambda k: (f"<{tag} name=\"f{k}\" style={quoteattr(name)} size=\"{size}\" "
+                              f"position=\"(0,0)\"></{tag}>")
+
+        def probe(term: str) -> int:
+            self._probe_n += 1
+            k = self._probe_n
+            xml = (f"<Script>{node(k)}"
+                   f"<Constant name=\"c{k}\" style=\"Numeric Constant\" value=\"0\" position=\"(0,0)\"></Constant>"
+                   f"<Wire source={quoteattr(f'f{k}.{term}')} destination=\"c{k}\"></Wire></Script>")
+            status, code, _ = self._gen_script(vi, xml, [], [])
+            return code if status else 0
+
+        cands = catalog.candidates(labels, size)
+        verified: list[str] = []
+        for i, cand in enumerate(cands):
+            code = probe(cand)
+            if code == 1374 and i == 0 and not verified:
+                raise LabVIEWError(
+                    f"{name!r} cannot be placed by name with LabVIEW's scripting (some newer palette "
+                    "functions, e.g. Write to Text File, are not reachable). Use an equivalent subVI "
+                    "from vi.lib through \"subvis\" (for files: vi.lib/Utility/file.llb, e.g. "
+                    "Write Delimited Spreadsheet.vi), or an older primitive such as Open File / "
+                    "Read File / Write File / Close File.")
+            if code == 0 and cand.lower() not in {v.lower() for v in verified}:
+                verified.append(cand)
+        res = {"function": name, "size": size, "terminals": verified, "help_labels": labels}
+        if size is None and catalog.is_growable(labels):
+            res["growable"] = (
+                "this node grows. size is LabVIEW's internal count and means different things per function "
+                "(Concatenate Strings / Build Array / Bundle / Unbundle: number of inputs or elements; "
+                "Format Into String: 3 + number of inputs). Call function_terminals(name, size) to see "
+                "which terminals a grown node has, pick the size that gives exactly the inputs you need "
+                "(unwired extra inputs can break the VI), and give that \"size\" in vi_create. "
+                "element[i] addresses terminals by position (for Concatenate Strings / Build Array, "
+                "element[1..N] are the inputs).")
+        cache[(name, size)] = res
+        return res
+
 
 VIS_DIR = Path(__file__).parent / "vis"
 BOOTSTRAP_VI = VIS_DIR / "lvmcp_gen_script.vi"
 BLANK_VI = VIS_DIR / "lvmcp_blank.vi"
 _GEN_ERRORS = {
-    1063: "a wire names a terminal that does not exist on that node (terminal names are the "
-          "labels shown in Context Help, or the subVI's control/indicator labels)",
+    1063: "a wire names a terminal that does not exist on that node. Call function_terminals(name) "
+          "for a function's exact terminal names; a subVI's terminals are its control/indicator labels "
+          "(see vi_text)",
     1374: "unknown function name or bad attribute in the generated script",
     1055: "invalid object reference",
 }

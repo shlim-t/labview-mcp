@@ -257,9 +257,9 @@ class _Builder:
             fn = f.get("function")
             if not isinstance(fn, str) or not fn.strip() or _TERM_BAD.search(fn):
                 raise SpecError(f"function {f.get('name')!r} needs 'function': the palette name, e.g. \"Add\"")
-            size = f.get("inputs")
+            size = f.get("size", f.get("inputs"))
             if size is not None and not (isinstance(size, int) and not isinstance(size, bool) and 1 <= size <= 100):
-                raise SpecError(f"function {f.get('name')!r}: \"inputs\" must be an integer 1..100")
+                raise SpecError(f"function {f.get('name')!r}: \"size\" must be an integer 1..100")
         for s in d.get("subvis", []) or []:
             self.add(s.get("name"), "subvi", container, s)
             path = s.get("path")
@@ -327,12 +327,10 @@ class _Builder:
         if k in ("function", "subvi"):
             if not term:
                 raise SpecError(f"wire end {end!r}: give the terminal, e.g. \"{node}.x\"")
-            if k == "function" and n.spec.get("inputs") is not None:
-                m = re.fullmatch(r"element\[(\d+)\]", term)
-                if term.startswith("element") and not (m and 1 <= int(m.group(1)) <= int(n.spec["inputs"])):
-                    # a bare "element" reference has crashed LabVIEW
-                    raise SpecError(f"wire end {end!r}: the inputs of {node!r} are "
-                                    f"element[1] .. element[{n.spec['inputs']}]")
+            if k == "function" and term.startswith("element") and not re.fullmatch(r"element\[\d+\]", term):
+                # a bare "element" reference has crashed LabVIEW
+                raise SpecError(f"wire end {end!r}: wire growable inputs by position as "
+                                f"\"{node}.element[1]\", \"{node}.element[2]\", ...")
             return end
         if k in _STRUCT_TERMS:
             lv = _STRUCT_TERMS[k].get(term)
@@ -449,7 +447,7 @@ class _Builder:
                 out.append(f"<Constant name={quoteattr(name)} typeindex=\"{ti}\" position=\"{p}\"></Constant>")
             elif n.kind == "function":
                 style = n.spec["function"].strip()
-                size = n.spec.get("inputs")
+                size = n.spec.get("size", n.spec.get("inputs"))
                 if size is None:
                     out.append(f"<Function name={quoteattr(name)} style={quoteattr(style)} position=\"{p}\"></Function>")
                 else:

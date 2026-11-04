@@ -24,8 +24,8 @@ mcp = MCPServer(
         "front-panel controls as text), and use vi_snapshot to SEE the block diagram when wiring "
         "matters. vi_snapshot(all_frames=true) also renders hidden case/sequence frames.\n"
         "To build a new VI: vi_create with a spec of controls, indicators, constants, functions, "
-        "subVIs and wires; check the returned diagram picture, then test with vi_run.
-"
+        "subVIs, structures and wires (lv_functions / function_terminals give exact function and "
+        "terminal names); check the returned diagram picture, then test with vi_run.\n"
         "All paths must be absolute. vi_run executes code on the user's machine and may drive "
         "real instruments; only run VIs the user asked you to run."
     ),
@@ -151,8 +151,8 @@ async def vi_create(
       "controls":   [{"name": "x", "type": "dbl", "label": "x", "default": 1.0}, ...],
       "indicators": [{"name": "result", "type": "dbl"}],
       "constants":  [{"name": "k", "type": "dbl", "value": 2.5}],
-      "functions":  [{"name": "add", "function": "Add"}],      # palette names: Add, Multiply,
-                    # Subtract, Divide, Concatenate Strings, Build Array, Index Array, ...
+      "functions":  [{"name": "add", "function": "Add"}],      # palette names; find them with
+                    # lv_functions(query) and their terminals with function_terminals(name)
       "subvis":     [{"name": "s", "path": "C:\\\\abs\\\\Helper.vi"}],
       "wires":      [["x", "add.x"], ["k", "add.y"], ["add.x+y", "result"]]
     }
@@ -181,10 +181,11 @@ async def vi_create(
                        "functions": [{"name": "a", "function": "Add"}]}],
        "wires": [["n", "L.N"], ["zero", "acc.left"], ["acc.left", "a.x"], ["L.i", "a.y"],
                  ["a.x+y", "acc.right"], ["acc.right", "total"]]}
-    Growable functions take "inputs": N and are wired as name.element[1] .. name.element[N]:
-      {"name": "cat", "function": "Concatenate Strings", "inputs": 3} -> cat.element[1..3], output
-      cat.concatenated string; Build Array -> element[i], "appended array"; Unbundle (by position,
-      "inputs" = number of cluster elements) -> u.cluster in, u.element[i] out; Bundle likewise.
+    Growable functions take "size" (check it with function_terminals(name, size)):
+      {"name": "cat", "function": "Concatenate Strings", "size": 3} -> inputs cat.element[1..3],
+      output cat.concatenated string; Build Array likewise ("appended array"); Unbundle (by
+      position, size = number of cluster elements) -> u.cluster in, u.element[i] out; Format Into
+      String with 2 inputs -> "size": 5, wired as fs.input 1, fs.input 2.
       Unbundle By Name / Bundle By Name cannot pick elements yet; use Unbundle / Bundle.
     A case wired to an error cluster has frames "No Error" and "Error".
     Connector pane: every control and indicator is wired to the 4x2x2x4 connector pane so the VI
@@ -205,6 +206,23 @@ async def vi_create(
     for p in imgs[:1]:
         out.append(_image(p, 2000))
     return out
+
+
+@mcp.tool()
+async def lv_functions(query: str) -> dict:
+    """Search LabVIEW's palette functions by name (words match in any order), e.g. "array",
+    "string length", "file". Use the exact name as "function" in vi_create, and call
+    function_terminals(name) to learn its terminal names."""
+    return await _run(lv.lv_functions, query)
+
+
+@mcp.tool()
+async def function_terminals(name: str, size: int | None = None) -> dict:
+    """Exact terminal names of one palette function, verified against LabVIEW's scripting engine
+    (Context Help labels sometimes differ, e.g. "Variant" vs "variant"). Wire them in vi_create
+    as "<node>.<terminal>". "help_labels" lists the Context Help text; inputs usually carry a
+    default in parentheses there. Growable nodes are wired as element[1..N] instead."""
+    return await _run(lv.function_terminals, name)
 
 
 def main() -> None:

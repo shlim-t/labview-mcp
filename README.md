@@ -4,7 +4,7 @@ An [MCP](https://modelcontextprotocol.io) server that lets AI coding agents — 
 
 LabVIEW source code is a binary, graphical format. Text-based coding agents can't open a `.vi` file. labview-mcp acts as the agent's eyes and hands: it drives your installed LabVIEW over its ActiveX server and returns what the agent needs as text, images, and values.
 
-> Status: **v0.2.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth.
+> Status: **v0.3.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth.
 
 ## What the agent can do
 
@@ -16,6 +16,8 @@ LabVIEW source code is a binary, graphical format. Text-based coding agents can'
 | `vi_snapshot` | PNG images of the block diagram, front panel, or connector pane. `all_frames=true` renders **every hidden case, sequence, and event frame**. |
 | `vi_hierarchy` | The subVI call tree. vi.lib, user.lib, and instr.lib are hidden by default. |
 | `vi_run` | Sets inputs, runs the VI, and returns all front-panel values. Stops VIs that don't finish within the time limit (UI loops). |
+| `lv_functions` | Searches the palette functions in your LabVIEW install by name. |
+| `function_terminals` | Exact terminal names of a function, **verified against LabVIEW's scripting engine** so the agent wires them right the first time. |
 | `vi_create` | **Builds a new VI** from a JSON spec: typed controls and indicators with defaults, constants, palette functions, subVI calls, For/While loops, shift registers, case structures, and wires. LabVIEW's Clean Up Diagram tidies the result, and the tool returns a picture of it. |
 
 Example prompts:
@@ -61,7 +63,7 @@ Loops and case structures go in `"structures"` and can hold their own constants,
 | While Loop | `{"type": "while_loop", "stop_if_true": true, ...}` | `W.i`, `W.stop` |
 | Case | `{"type": "case", "output_tunnels": ["t"], "cases": [{"value": true, ...}, {"default": true, ...}]}` | `C.selector`, tunnel `t` |
 
-Growable functions take `"inputs": N` and are wired as `name.element[1]` .. `name.element[N]`. This covers Concatenate Strings, Build Array, and positional Bundle/Unbundle. A case wired to an `error` cluster gets `"No Error"` and `"Error"` frames.
+Growable functions take `"size"`. For example, Concatenate Strings with `"size": 3` is wired as `cat.element[1..3]`. `function_terminals(name, size)` shows the terminals a grown node has. A case wired to an `error` cluster gets `"No Error"` and `"Error"` frames.
 
 Wire straight across structure borders and LabVIEW adds the tunnels. For Loops build arrays from values that leave them, and While Loops pass out the last value. Each frame of a case wires its result to an output tunnel.
 
