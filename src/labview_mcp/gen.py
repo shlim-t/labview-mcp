@@ -602,7 +602,8 @@ def _assign_connector(controls: list[dict], default="auto") -> dict[str, str]:
     return taken
 
 
-def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(30, 30)) -> Script:
+def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(30, 30),
+          edit: bool = False) -> Script:
     """existing: objects already on the diagram that the spec refers to, in ObjRefsIn order; each a
     name (a front-panel terminal) or {"name", "kind", "spec"} (see _Builder.add_existing). Used by
     vi_edit. New controls then stay off the connector pane unless they ask for a slot."""
@@ -628,7 +629,7 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
                 raise SpecError(f"indicator {c['name']!r} cannot have a default")
             defaults[labels[c["name"]]] = c["default"]
     b.collect(spec, "")
-    if not existing and not any(n.kind not in ("control", "indicator") for n in b.nodes.values()):
+    if not edit and not existing and not any(n.kind not in ("control", "indicator") for n in b.nodes.values()):
         # A diagram holding only terminals is saved by LabVIEW as a file it cannot reopen.
         raise SpecError("the diagram needs at least one constant, function, subVI or structure")
 

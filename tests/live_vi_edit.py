@@ -136,5 +136,23 @@ vals = call(lv.vi_run, case, {"s": False}, None, 10)["values"]
 check("frame code wired across the border", len(nots) == 1 and nots[0]["in"].endswith("#1") and fed
       and vals.get("r") == 2.0, f"{[(n['id'], n['in']) for n in nots]} {fed} {vals}")
 
+# A VI the compiler exporter refuses (NI example with property nodes): vi_dump falls back to a scan,
+# and vi_edit can still remove a node by its id.
+import shutil
+ex = os.path.join(r"C:\Program Files\National Instruments\LabVIEW 2026\examples",
+                  r"Mathematics\Probability and Statistics\Probability Density.vi")
+if os.path.exists(ex):
+    pd = os.path.join(D, "Probability Density.vi")
+    shutil.copyfile(ex, pd)
+    g = call(lv.vi_dump, pd)
+    waits = [n for n in g["nodes"] if n.get("function") == "Wait (ms)"]
+    check("scan fallback", g["source"] == "scan" and len(waits) == 1 and len(g["wires"]) > 40,
+          f"{g['source']} {len(g['nodes'])} nodes")
+    call(lv.vi_edit, pd, {"remove": [waits[0]["id"]]}, False, True)
+    g2 = call(lv.vi_dump, pd)
+    left = [n for n in g2["nodes"] if n.get("function") == "Wait (ms)"]
+    check("edit a scan-only VI", not left and len(g2["nodes"]) == len(g["nodes"]) - 2,
+          f"{len(g['nodes'])} -> {len(g2['nodes'])} nodes")
+
 print(f"{'all passed' if not failed else f'{failed} failed'}; files in {D}")
 sys.exit(1 if failed else 0)

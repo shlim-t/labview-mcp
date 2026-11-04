@@ -212,16 +212,18 @@ async def vi_create(
 
 
 @mcp.tool()
-async def vi_dump(path: str) -> dict:
-    """The block diagram as a graph: every node (controls, indicators, constants with their values,
-    functions by palette name, subVIs by path, loops, cases with their frame values, tunnels,
-    shift registers), which diagram it sits in ("in": a structure id, "case_4#1" = frame 1), and
-    every wire with its source, sinks and data type. Node ids are what vi_edit's "remove" and
-    "existing" take; they are renumbered after every edit, so dump again before the next one.
-    Works for VIs built from common nodes. LabVIEW's exporter refuses some nodes (property and
-    invoke nodes, event structures, Express VIs, ...); then fall back to vi_text and vi_snapshot.
-    Broken and password-protected VIs cannot be read."""
-    return await _run(lv.vi_dump, path)
+async def vi_dump(path: str, method: str = "auto") -> dict:
+    """The block diagram as a graph: every node (controls, indicators, constants, functions by
+    palette name, subVIs, loops, cases and their frames, tunnels, shift registers, property/invoke
+    nodes), which diagram it sits in ("in": a structure id, "case_4#1" = frame 1), and every wire
+    with its source and sinks as "node.terminal". Node ids are what vi_edit's "remove" and
+    "existing" take; dump again after each edit.
+
+    "source" says how it was read. method="auto" first uses LabVIEW's compiler export ("dfir": adds
+    constant values, data types and case frame values, but refuses VIs with some controls or
+    nodes), then walks the diagram objects instead ("scan": works on any VI, including broken
+    ones). method="dfir" or "scan" forces one. Password-protected VIs cannot be read."""
+    return await _run(lv.vi_dump, path, method)
 
 
 @mcp.tool(structured_output=False)

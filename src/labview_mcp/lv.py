@@ -552,7 +552,7 @@ class LabVIEW:
         main_spec["wires"] = main_wires
         script = gen.build(main_spec,
                            existing=[{"name": b[0], "kind": b[1], "spec": b[3]} for b in bindings],
-                           origin=(30, bdh + 80), fp_origin=(30, fph + 60))
+                           origin=(30, bdh + 80), fp_origin=(30, fph + 60), edit=True)
         frame_scripts = []
         for (cname, cuid, k, contents), fw in zip(frame_jobs, frame_wires):
             used = {str(e).split(".")[0] for w in fw for e in
@@ -570,9 +570,20 @@ class LabVIEW:
 
         removed = 0
         if remove_nodes:
+            gone = {n["id"] for n in remove_nodes}
+
+            def node_part(end):
+                return end.split(".")[0].split("[")[0]
+            # Constants that only fed removed nodes go too (as Quick Drop's remover does).
+            for n in list(by_id.values()):
+                if n["kind"] != "constant" or n["id"] in gone or "uid" not in n:
+                    continue
+                outs = [w for w in graph["wires"] if w["from"] and node_part(w["from"]) == n["id"]]
+                if outs and all(node_part(t) in gone for w in outs for t in w["to"]):
+                    remove_nodes.append(n)
+                    gone.add(n["id"])
             items = [self._ref_for_uid(target, n["uid"], n["kind"]) for n in remove_nodes]
             # Wires that touched the removed nodes (by vi_dump id prefix of their ends).
-            gone = {n["id"] for n in remove_nodes}
             touching = {w["uid"] for w in graph["wires"] if w.get("uid") is not None and any(
                 end.split(".")[0].split("[")[0] in gone for end in [w["from"] or ""] + w["to"])}
             try:
@@ -604,8 +615,11 @@ class LabVIEW:
                 refs.append(self._ref_for_uid(target, how[1], how[2]))
 
         before = self._sink_count(path)
-        status, code, source = self._gen_script(target, script.xml, script.type_strings,
-                                                script.data_strings, refs=refs, raw=True)
+        if script.xml.strip() == "<Script>\n</Script>":  # only removals
+            status, code, source = False, 0, ""
+        else:
+            status, code, source = self._gen_script(target, script.xml, script.type_strings,
+                                                    script.data_strings, refs=refs, raw=True)
         ref_of = {b[0]: r for b, r in zip(bindings, refs)}
         if not status and frame_scripts:
             diags = self._uid_map(target, "Diagram", fresh=True)
@@ -689,6 +703,12 @@ class LabVIEW:
         UID of that LabVIEW Diagram object. Found by dropping a marker constant into every diagram,
         reading back where vi_dump sees it, and reverting the VI."""
         from . import gen
+        try:
+            self._dfir_text(path)
+        except LabVIEWError:
+            # No compiler export (e.g. property nodes, or a broken VI): take the frames from a scan,
+            # numbered in the order the frames were created.
+            return self._scan(path)["diagram_uids"]
         diags = self._uid_map(target, "Diagram", fresh=True)
         ty = gen.parse_type("i32")
         base = 1_900_000_000
@@ -777,11 +797,59 @@ class LabVIEW:
                 cache[path] = None
         return cache[path]
 
-    def vi_dump(self, path: str) -> dict:
+    def vi_dump(self, path: str, method: str = "auto") -> dict:
+        """method: "dfir" (compiler export: constant values, but refuses some VIs), "scan" (walk the
+        objects with VI Scripting: any VI, including broken ones, no constant values) or "auto"
+        (dfir, falling back to scan)."""
         from . import catalog, dfir
-        text = self._dfir_text(check_vi_path(path))
-        g = dfir.parse(text, catalog.load(self.app.ApplicationDirectory), self._connector_labels)
-        return {"vi": str(path), **g}
+        path = check_vi_path(path)
+        if method not in ("auto", "dfir", "scan"):
+            raise LabVIEWError("method must be auto, dfir or scan")
+        if method != "scan":
+            try:
+                text = self._dfir_text(path)
+                g = dfir.parse(text, catalog.load(self.app.ApplicationDirectory), self._connector_labels)
+                return {"vi": str(path), "source": "dfir", **g}
+            except LabVIEWError as e:
+                if method == "dfir" or "password-protected" in str(e):
+                    raise
+        return {"vi": str(path), "source": "scan",
+                "note": "read by walking the diagram objects: constant values are not included, and "
+                        "case frames are numbered in creation order",
+                **self._scan(path)}
+
+    def _scan(self, path: str) -> dict:
+        from . import scan
+        target = self._vi(path)
+        target._FlagAsMethod("GetLockState")
+        if _try(lambda: target.GetLockState()) == 3:
+            raise LabVIEWError(f"{Path(path).name} is password-protected; its block diagram cannot be read.")
+        h = self._vi(str(UIDS_VI))
+        h.SetControlValue("VI Refnum", target)
+        h.SetControlValue("Class Name", "GObject")
+        h.SetControlValue("Traverse Target", 1)
+        h.Run(True)  # asynchronous so a stuck helper can be aborted instead of hanging the server
+        t0 = time.monotonic()
+        while h.ExecState in (2, 3):
+            if time.monotonic() - t0 > 120:
+                h.Abort()
+                raise LabVIEWError("reading the diagram objects timed out")
+            time.sleep(0.05)
+        cols = [list(h.GetControlValue(c) or ()) for c in
+                ("UIDs", "Classes", "Owner UIDs", "Is Source", "Wire UIDs", "Names", "References")]
+        rows = [scan.Row(int(u), str(c), int(o), bool(s), int(w), str(n))
+                for u, c, o, s, w, n, _ in zip(*cols)]
+        # Labels name functions ("Add") and subVIs ("Scale.vi"); only nodes need them.
+        lab = self._vi(str(Path(self.app.ApplicationDirectory) / _VILIB_TREF / "Get GObject Label.vi"))
+        labels = {}
+        for r, ref in zip(rows, cols[6]):
+            if r.cls in ("Wire", "Diagram", "TopLevelDiagram", "Text", "ControlTerminal") or \
+                    r.cls.endswith("Terminal") or r.cls.endswith("Tunnel") or r.cls.endswith("Constant"):
+                continue
+            lab.SetControlValue("GObject", ref)
+            lab.Run(False)
+            labels[r.uid] = lab.GetControlValue("Object Label")
+        return scan.build(rows, labels)
 
 
 VIS_DIR = Path(__file__).parent / "vis"
