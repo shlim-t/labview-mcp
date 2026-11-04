@@ -4,7 +4,7 @@ An [MCP](https://modelcontextprotocol.io) server that lets AI coding agents — 
 
 LabVIEW source code is a binary, graphical format. Text-based coding agents can't open a `.vi` file. labview-mcp acts as the agent's eyes and hands: it drives your installed LabVIEW over its ActiveX server and returns what the agent needs as text, images, and values.
 
-> Status: **v0.6.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth. Any existing VI can be read as a graph (`vi_dump`) and changed in place (`vi_edit`: remove, replace, and add code, including inside existing loops and case frames).
+> Status: **v0.6.1.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth. Any existing VI can be read as a graph (`vi_dump`) and changed in place (`vi_edit`: remove, replace, and add code, including inside existing loops and case frames).
 
 ## What the agent can do
 
@@ -16,7 +16,7 @@ LabVIEW source code is a binary, graphical format. Text-based coding agents can'
 | `vi_snapshot` | PNG images of the block diagram, front panel, or connector pane. `all_frames=true` renders **every hidden case, sequence, and event frame**. |
 | `vi_hierarchy` | The subVI call tree. vi.lib, user.lib, and instr.lib are hidden by default. |
 | `vi_run` | Sets inputs, runs the VI, and returns all front-panel values. Stops VIs that don't finish within the time limit (UI loops). |
-| `vi_dump` | **The block diagram as a JSON graph**: every node (functions by palette name, constants, subVIs, loops, case frames, tunnels, shift registers, property nodes) and every wire with its source and sinks. Works on any VI, including broken ones. |
+| `vi_dump` | **The block diagram as a JSON graph**: every node (functions by palette name, constants with their values, subVIs, loops, case frames, tunnels, shift registers, property nodes) and every wire with its source and sinks. Works on any VI, including broken ones. |
 | `vi_edit` | **Changes an existing VI in place.** It removes nodes, adds code, and wires to existing controls, nodes, loops, and case frames (by `vi_dump` id). The rest of the diagram keeps its layout. It backs up the VI first, and reverts instead of saving if the result is broken or a wire could not be made. |
 | `lv_functions` | Searches the palette functions in your LabVIEW install by name. |
 | `function_terminals` | Exact terminal names of a function, **verified against LabVIEW's scripting engine** so the agent wires them right the first time. |
@@ -44,7 +44,9 @@ Example prompts:
 `vi_dump` reads a diagram in one of two ways and reports which one it used in `"source"`:
 
 - `"dfir"` uses LabVIEW's compiler export. It includes constant values, data types, and case values, but LabVIEW refuses it for some VIs, for example ones with certain front-panel controls.
-- `"scan"` walks every diagram object with VI Scripting. It works on any VI that opens, including broken VIs and VIs with property nodes or event structures. It does not include constant values.
+- `"scan"` walks every diagram object with VI Scripting. It works on any VI that opens, including broken VIs and VIs with property nodes or event structures.
+
+Both ways report constant values, including arrays and clusters.
 
 On a random sample of 50 NI example VIs, every VI was read. Password-protected VIs are refused, by design.
 
@@ -108,6 +110,8 @@ Growable functions take `"size"`. For example, Concatenate Strings with `"size":
 Wire straight across structure borders and LabVIEW adds the tunnels. For Loops build arrays from values that leave them, and While Loops pass out the last value. Each frame of a case wires its result to an output tunnel.
 
 **Connector pane:** every control and indicator is wired to the standard 4x2x2x4 connector pane, so a generated VI works as a subVI right away. Inputs go on the left, outputs on the right, and `error` clusters on the bottom corners, as in NI's own VIs. To pin a slot, use `"connector": "left3"`; to leave a terminal unwired, use `"connector": false`. The tool reports the resulting layout.
+
+Strings are stored in the Windows ANSI code page, as LabVIEW does, so characters outside it (for example `é` on Korean Windows) become the closest match.
 
 Types: `dbl sgl i8 i16 i32 i64 u8 u16 u32 u64 bool string path error`, arrays (`"dbl[]"`, `"i32[][]"`), and clusters (`{"cluster": [{"name": "gain", "type": "dbl"}, ...]}`). Function terminals use the names shown in LabVIEW's Context Help. SubVI terminals use the subVI's control labels.
 

@@ -97,7 +97,7 @@ class LVType:
         if k == "bool":
             return b"\x01" if v else b"\x00"
         if k == "string":
-            b = ("" if v is None else str(v)).encode("utf-8")
+            b = _lv_text(v)
             return struct.pack(">i", len(b)) + b
         if k == "path":
             return _flatten_path(v)
@@ -115,6 +115,16 @@ class LVType:
                 raise SpecError(f"cluster value needs {len(self.fields)} elements, got {len(v)}")
             return b"".join(t.data(x) for (_, t), x in zip(self.fields, v))
         raise SpecError(f"unsupported type {k}")  # pragma: no cover
+
+
+def _lv_text(v) -> bytes:
+    """LabVIEW strings hold bytes in the Windows ANSI code page (e.g. CP949 on Korean Windows), not
+    UTF-8. Characters the code page cannot represent become '?'."""
+    s = "" if v is None else str(v)
+    try:
+        return s.encode("mbcs", "replace")
+    except LookupError:  # not Windows
+        return s.encode("utf-8")
 
 
 def _shape(v, dims):
@@ -151,7 +161,7 @@ def _flatten_path(v) -> bytes:
             comps[0] = comps[0][0]    # LabVIEW stores the drive as "C"
     body = struct.pack(">HH", ptype, len(comps))
     for c in comps:
-        b = c.encode("utf-8")
+        b = _lv_text(c)
         body += bytes([len(b)]) + b
     return b"PTH0" + struct.pack(">i", len(body)) + body
 

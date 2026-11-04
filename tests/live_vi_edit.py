@@ -154,5 +154,19 @@ if os.path.exists(ex):
     check("edit a scan-only VI", not left and len(g2["nodes"]) == len(g["nodes"]) - 2,
           f"{len(g['nodes'])} -> {len(g2['nodes'])} nodes")
 
+# constant values, read both ways (dfir and scan), including non-ASCII text in the ANSI code page
+cv = os.path.join(D, "consts.vi")
+consts = [("d", "dbl", 2.5), ("i", "i32", -7), ("b", "bool", True), ("s", "string", "hello 안녕"),
+          ("a", "dbl[]", [1.5, 2.5]), ("c", {"cluster": [{"name": "g", "type": "dbl"},
+                                                        {"name": "t", "type": "string"}]}, [3.0, "x"])]
+call(lv.vi_create, cv, {"constants": [{"name": n, "type": t, "value": v} for n, t, v in consts],
+                        "indicators": [{"name": "o" + n, "type": t} for n, t, v in consts],
+                        "wires": [[n, "o" + n] for n, t, v in consts]}, True, "")
+want = sorted(json.dumps(v) for _, _, v in consts)
+for method in ("dfir", "scan"):
+    g = call(lv.vi_dump, cv, method)
+    got = sorted(json.dumps(n.get("value")) for n in g["nodes"] if n["kind"] == "constant")
+    check(f"constant values ({method})", got == want, got)
+
 print(f"{'all passed' if not failed else f'{failed} failed'}; files in {D}")
 sys.exit(1 if failed else 0)

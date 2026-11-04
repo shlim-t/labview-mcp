@@ -128,7 +128,7 @@ class TypeTable:
         if k == "string":
             n = struct.unpack_from("<i", b, p)[0]
             raw = b[p + 4:p + 4 + n]
-            for enc in ("utf-8", "cp949", "latin-1"):
+            for enc in ("mbcs", "utf-8", "latin-1"):  # LabVIEW strings use the ANSI code page
                 try:
                     return raw.decode(enc), p + 4 + n
                 except UnicodeDecodeError:

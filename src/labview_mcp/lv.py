@@ -6,6 +6,7 @@ so callers use `LabVIEW.call(fn, *args)` which returns a concurrent Future.
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import os
 import re
 import shutil
@@ -671,7 +672,12 @@ class LabVIEW:
             h.SetControlValue("Class Name", cls)
             h.SetControlValue("Traverse Target", 1)
             h.Run(False)
-            cache[cls] = dict(zip(h.GetControlValue("UIDs") or (), h.GetControlValue("References") or ()))
+            uids = list(h.GetControlValue("UIDs") or ())
+            owners = list(h.GetControlValue("Owner UIDs") or ()) or [0] * len(uids)
+            refs = list(h.GetControlValue("References") or ())
+            # element constants inside array / cluster constants are not objects of their own
+            cache[cls] = {u: r for u, o, r in zip(uids, owners, refs)
+                          if not (cls == "Constant" and o in uids)}
         return cache[cls]
 
     def _remove(self, vi, items: list) -> None:
@@ -809,6 +815,8 @@ class LabVIEW:
             try:
                 text = self._dfir_text(path)
                 g = dfir.parse(text, catalog.load(self.app.ApplicationDirectory), self._connector_labels)
+                if any(n["kind"] == "constant" and "[]" in json.dumps(n.get("type", "")) for n in g["nodes"]):
+                    self._fill_array_constants(path, g)
                 return {"vi": str(path), "source": "dfir", **g}
             except LabVIEWError as e:
                 if method == "dfir" or "password-protected" in str(e):
@@ -817,6 +825,26 @@ class LabVIEW:
                 "note": "read by walking the diagram objects: constant values are not included, and "
                         "case frames are numbered in creation order",
                 **self._scan(path)}
+
+    def _fill_array_constants(self, path: str, g: dict) -> None:
+        """The DFIR export leaves array constants empty; read constant values with VI Scripting.
+        DFIR reports a constant by its data object's UID, a few above the constant's own UID."""
+        target = self._vi(path)  # keep the reference alive while the helper runs
+        h = self._vi(str(UIDS_VI))
+        h.SetControlValue("VI Refnum", target)
+        h.SetControlValue("Class Name", "Constant")
+        h.SetControlValue("Traverse Target", 1)
+        h.Run(False)
+        uids = list(h.GetControlValue("UIDs") or ())
+        owners = list(h.GetControlValue("Owner UIDs") or ())
+        vals = _try(lambda: list(h.GetControlValue("Values") or ()), []) or []
+        # skip the element constants inside array / cluster constants
+        by_uid = {u: v for u, o, v in zip(uids, owners, vals) if o not in uids}
+        for n in g["nodes"]:
+            if n["kind"] == "constant" and "uid" in n and "[]" in json.dumps(n.get("type", "")):
+                below = [u for u in by_uid if u <= n["uid"]]
+                if below:
+                    n["value"] = _jsonable(by_uid[max(below)])
 
     def _scan(self, path: str) -> dict:
         from . import scan
@@ -837,8 +865,11 @@ class LabVIEW:
             time.sleep(0.05)
         cols = [list(h.GetControlValue(c) or ()) for c in
                 ("UIDs", "Classes", "Owner UIDs", "Is Source", "Wire UIDs", "Names", "References")]
-        rows = [scan.Row(int(u), str(c), int(o), bool(s), int(w), str(n))
-                for u, c, o, s, w, n, _ in zip(*cols)]
+        values = _try(lambda: list(h.GetControlValue("Values") or ()), []) or []
+        values += [None] * (len(cols[0]) - len(values))
+        rows = [scan.Row(int(u), str(c), int(o), bool(s), int(w), str(n),
+                         _jsonable(v) if str(c).endswith("Constant") else None)
+                for u, c, o, s, w, n, _, v in zip(*cols, values)]
         # Labels name functions ("Add") and subVIs ("Scale.vi"); only nodes need them.
         lab = self._vi(str(Path(self.app.ApplicationDirectory) / _VILIB_TREF / "Get GObject Label.vi"))
         labels = {}

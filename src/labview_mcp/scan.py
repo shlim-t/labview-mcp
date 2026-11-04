@@ -22,6 +22,7 @@ class Row:
     source: bool
     wire: int
     name: str
+    value: object = None  # constants only
 
 
 _STRUCTS = {"ForLoop": "for_loop", "WhileLoop": "while_loop", "CaseStructure": "case",
@@ -62,6 +63,8 @@ def build(rows: list[Row], labels: dict[int, str]) -> dict:
     for r in rows:
         if r.cls in _SKIP or _is_terminal(r.cls) or r.cls.endswith("Tunnel") or "ShiftRegister" in r.cls:
             continue
+        if r.cls.endswith("Constant") and by_uid.get(r.owner) and by_uid[r.owner].cls.endswith("Constant"):
+            continue  # the element of an array/cluster constant, not a node of its own
         if r.cls == "ControlTerminal":
             node_id[r.uid] = f"{_slug(r.name)}_{r.uid}"
         elif r.cls.endswith("Constant"):
@@ -105,6 +108,8 @@ def build(rows: list[Row], labels: dict[int, str]) -> dict:
                 n["frames"] = [{"index": i} for i in range(len(frames[r.uid]))]
         elif r.cls.endswith("Constant"):
             n["kind"] = "constant"
+            if r.value is not None:
+                n["value"] = r.value
         elif "SubVI" in r.cls or r.cls in ("StaticVIReference", "CallParentNode", "CallByReference"):
             n["kind"] = "subvi"
             n["vi"] = labels.get(r.uid, "")

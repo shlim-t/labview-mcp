@@ -220,9 +220,9 @@ async def vi_dump(path: str, method: str = "auto") -> dict:
     "existing" take; dump again after each edit.
 
     "source" says how it was read. method="auto" first uses LabVIEW's compiler export ("dfir": adds
-    constant values, data types and case frame values, but refuses VIs with some controls or
-    nodes), then walks the diagram objects instead ("scan": works on any VI, including broken
-    ones). method="dfir" or "scan" forces one. Password-protected VIs cannot be read."""
+    wire data types and case frame values, but refuses VIs with some controls or nodes), then
+    walks the diagram objects instead ("scan": works on any VI, including broken ones). Both
+    include constant values. method="dfir" or "scan" forces one. Password-protected VIs cannot be read."""
     return await _run(lv.vi_dump, path, method)
 
 
