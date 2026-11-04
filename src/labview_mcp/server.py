@@ -181,6 +181,12 @@ async def vi_create(
                        "functions": [{"name": "a", "function": "Add"}]}],
        "wires": [["n", "L.N"], ["zero", "acc.left"], ["acc.left", "a.x"], ["L.i", "a.y"],
                  ["a.x+y", "acc.right"], ["acc.right", "total"]]}
+    Growable functions take "inputs": N and are wired as name.element[1] .. name.element[N]:
+      {"name": "cat", "function": "Concatenate Strings", "inputs": 3} -> cat.element[1..3], output
+      cat.concatenated string; Build Array -> element[i], "appended array"; Unbundle (by position,
+      "inputs" = number of cluster elements) -> u.cluster in, u.element[i] out; Bundle likewise.
+      Unbundle By Name / Bundle By Name cannot pick elements yet; use Unbundle / Bundle.
+    A case wired to an error cluster has frames "No Error" and "Error".
     Connector pane: every control and indicator is wired to the 4x2x2x4 connector pane so the VI
     works as a subVI right away (controls on the left then top, indicators on the right then
     bottom, in spec order). Pin a slot with "connector": "left3" (left0-3, top0-1, bottom0-1,

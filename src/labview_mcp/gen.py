@@ -257,6 +257,9 @@ class _Builder:
             fn = f.get("function")
             if not isinstance(fn, str) or not fn.strip() or _TERM_BAD.search(fn):
                 raise SpecError(f"function {f.get('name')!r} needs 'function': the palette name, e.g. \"Add\"")
+            size = f.get("inputs")
+            if size is not None and not (isinstance(size, int) and not isinstance(size, bool) and 1 <= size <= 100):
+                raise SpecError(f"function {f.get('name')!r}: \"inputs\" must be an integer 1..100")
         for s in d.get("subvis", []) or []:
             self.add(s.get("name"), "subvi", container, s)
             path = s.get("path")
@@ -324,6 +327,12 @@ class _Builder:
         if k in ("function", "subvi"):
             if not term:
                 raise SpecError(f"wire end {end!r}: give the terminal, e.g. \"{node}.x\"")
+            if k == "function" and n.spec.get("inputs") is not None:
+                m = re.fullmatch(r"element\[(\d+)\]", term)
+                if term.startswith("element") and not (m and 1 <= int(m.group(1)) <= int(n.spec["inputs"])):
+                    # a bare "element" reference has crashed LabVIEW
+                    raise SpecError(f"wire end {end!r}: the inputs of {node!r} are "
+                                    f"element[1] .. element[{n.spec['inputs']}]")
             return end
         if k in _STRUCT_TERMS:
             lv = _STRUCT_TERMS[k].get(term)
@@ -439,8 +448,14 @@ class _Builder:
                 ti = self.add_type(n.spec.get("type", "dbl"), n.spec.get("value"))
                 out.append(f"<Constant name={quoteattr(name)} typeindex=\"{ti}\" position=\"{p}\"></Constant>")
             elif n.kind == "function":
-                out.append(f"<Function name={quoteattr(name)} style={quoteattr(n.spec['function'].strip())} "
-                           f"position=\"{p}\"></Function>")
+                style = n.spec["function"].strip()
+                size = n.spec.get("inputs")
+                if size is None:
+                    out.append(f"<Function name={quoteattr(name)} style={quoteattr(style)} position=\"{p}\"></Function>")
+                else:
+                    tag = "BuildArray" if style.lower() == "build array" else "GrowableFunction"
+                    out.append(f"<{tag} name={quoteattr(name)} style={quoteattr(style)} size=\"{int(size)}\" "
+                               f"position=\"{p}\"></{tag}>")
             elif n.kind == "subvi":
                 out.append(f"<SubVI name={quoteattr(name)} path={quoteattr(n.spec['_path'])} ignoreSearchDialog=\"TRUE\" "
                            f"position=\"{p}\"></SubVI>")
@@ -490,6 +505,15 @@ CONPANE_SLOTS = {"left0": 11, "left1": 10, "left2": 9, "left3": 8, "top0": 7, "t
                  "bottom0": 6, "bottom1": 4, "right0": 3, "right1": 2, "right2": 1, "right3": 0}
 _AUTO_ORDER = {False: ["left0", "left1", "left2", "top0", "top1", "left3"],
                True: ["right0", "right1", "right2", "bottom0", "bottom1", "right3"]}
+
+
+def _fp_height(t: LVType) -> int:
+    """Rough height of a front-panel control of this type, used to stack controls."""
+    if t.kind == "cluster":
+        return 30 + sum(_fp_height(f) for _, f in t.fields)
+    if t.kind == "array":
+        return _fp_height(t.elem) + 10
+    return 45
 
 
 def _assign_connector(controls: list[dict]) -> dict[str, str]:
@@ -559,13 +583,12 @@ def build(spec: dict) -> Script:
 
     conpane = _assign_connector(controls)
     out = ["<Script>"]
-    fp_rows = {False: 0, True: 0}
+    fp_y = {False: 30, True: 30}  # labels sit above the control, so start below the top edge
     for c in controls:
         ti = b.add_type(c.get("type", "dbl"), c.get("default"))
         n = c["name"]
-        r = fp_rows[c["_ind"]]
-        fp_rows[c["_ind"]] += 1
-        fp = (300 if c["_ind"] else 20, 20 + r * 60)
+        fp = (350 if c["_ind"] else 30, fp_y[c["_ind"]])
+        fp_y[c["_ind"]] += _fp_height(parse_type(c.get("type", "dbl"))) + 25
         out.append(f"<Control name={quoteattr(n)} typeindex=\"{ti}\""
                    + (" indicator=\"TRUE\"" if c["_ind"] else "")
                    + f" label={quoteattr(labels[n])}"

@@ -86,6 +86,33 @@ CASES = {
                         "subvis": [{"name": "s", "path": "{D}/sub_scale.vi"}]}],
         "wires": [["xs", "s.x"], ["g", "s.gain"], ["s.y", "ys"]],
     }, {}, {"ys": [10.0, 20.0, 30.0]}),
+    # growable functions: N inputs element[1..N]
+    "growable": ({
+        "controls": [{"name": "a", "type": "string", "default": "ab"},
+                     {"name": "b", "type": "string", "default": "cd"},
+                     {"name": "x", "type": "dbl", "default": 1.5},
+                     {"name": "cl", "type": {"cluster": [{"name": "gain", "type": "dbl"},
+                                                          {"name": "tag", "type": "string"}]},
+                      "default": [2.0, "hello"]}],
+        "indicators": [{"name": "s", "type": "string"}, {"name": "arr", "type": "dbl[]"},
+                       {"name": "t", "type": "string", "label": "tag"}],
+        "constants": [{"name": "dash", "type": "string", "value": "-"}],
+        "functions": [{"name": "cat", "function": "Concatenate Strings", "inputs": 3},
+                      {"name": "ba", "function": "Build Array", "inputs": 2},
+                      {"name": "u", "function": "Unbundle", "inputs": 2}],
+        "wires": [["a", "cat.element[1]"], ["dash", "cat.element[2]"], ["b", "cat.element[3]"],
+                  ["cat.concatenated string", "s"], ["x", "ba.element[1]"], ["x", "ba.element[2]"],
+                  ["ba.appended array", "arr"], ["cl", "u.cluster"], ["u.element[2]", "t"]],
+    }, {}, {"s": "ab-cd", "arr": [1.5, 1.5], "tag": "hello"}),
+    # case structure driven by an error cluster
+    "error_case": ({
+        "controls": [{"name": "ei", "type": "error", "label": "error in"}],
+        "indicators": [{"name": "msg", "type": "string"}],
+        "structures": [{"name": "C", "type": "case", "output_tunnels": ["t"], "cases": [
+            {"value": "No Error", "constants": [{"name": "ok", "type": "string", "value": "fine"}]},
+            {"value": "Error", "constants": [{"name": "bad", "type": "string", "value": "failed"}]}]}],
+        "wires": [["ei", "C.selector"], ["ok", "t"], ["bad", "t"], ["t", "msg"]],
+    }, {"error in": [True, 42, "boom"]}, {"msg": "failed"}),
 }
 
 

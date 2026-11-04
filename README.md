@@ -61,6 +61,8 @@ Loops and case structures go in `"structures"` and can hold their own constants,
 | While Loop | `{"type": "while_loop", "stop_if_true": true, ...}` | `W.i`, `W.stop` |
 | Case | `{"type": "case", "output_tunnels": ["t"], "cases": [{"value": true, ...}, {"default": true, ...}]}` | `C.selector`, tunnel `t` |
 
+Growable functions take `"inputs": N` and are wired as `name.element[1]` .. `name.element[N]`. This covers Concatenate Strings, Build Array, and positional Bundle/Unbundle. A case wired to an `error` cluster gets `"No Error"` and `"Error"` frames.
+
 Wire straight across structure borders and LabVIEW adds the tunnels. For Loops build arrays from values that leave them, and While Loops pass out the last value. Each frame of a case wires its result to an output tunnel.
 
 **Connector pane:** every control and indicator is wired to the standard 4x2x2x4 connector pane, so a generated VI works as a subVI right away. Inputs go on the left, outputs on the right, and `error` clusters on the bottom corners, as in NI's own VIs. To pin a slot, use `"connector": "left3"`; to leave a terminal unwired, use `"connector": false`. The tool reports the resulting layout.
