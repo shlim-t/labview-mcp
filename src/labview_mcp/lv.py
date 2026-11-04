@@ -313,22 +313,34 @@ class LabVIEW:
         if description:
             target.Description = description
         target.SaveInstrument(str(p), False, False)
-        return {
+        res = {
             "path": str(p),
             "exec_state": EXEC_STATES.get(target.ExecState, target.ExecState),
             "front_panel": script.labels,
             "connector_pane": script.connector,
             "script_xml": script.xml,
         }
+        made = self._sink_count(str(p))
+        if made is not None and made < len(script.wires):
+            res["warning"] = (f"only {made} of {len(script.wires)} wires were connected; LabVIEW silently "
+                              "drops a wire it cannot make. Compare with vi_dump and fix the spec.")
+        return res
 
-    def _gen_script(self, target, xml: str, type_strings: list[bytes], data_strings: list[bytes]):
-        boot = self._vi(str(BOOTSTRAP_VI))
+    def _gen_script(self, target, xml: str, type_strings: list[bytes], data_strings: list[bytes],
+                    refs=(), raw: bool = False):
+        """raw=True uses the helper without Clean Up Diagram (edits keep the user's layout)."""
+        boot = self._vi(str(RAW_GEN_VI if raw else BOOTSTRAP_VI))
         boot.SetControlValue("reference", target)
         boot.SetControlValue("XML Script Commands", xml)
         boot.SetControlValue("Type Strings", _byte_strings(type_strings))
         boot.SetControlValue("Data Strings", _byte_strings(data_strings))
-        boot.Run(False)
-        return boot.GetControlValue("error out")
+        boot.SetControlValue("Obj Refs In[]", list(refs))
+        try:
+            boot.Run(False)
+            return boot.GetControlValue("error out")
+        finally:
+            if refs:
+                _try(lambda: boot.SetControlValue("Obj Refs In[]", []))
 
     def _probe_vi(self):
         """A scratch VI kept in memory (never saved) for probing terminal names."""
@@ -400,10 +412,156 @@ class LabVIEW:
         cache[(name, size)] = res
         return res
 
+    def _fp_refs_by_label(self, vi) -> dict:
+        """Front-panel controls and indicators of an open VI, label -> GObject refnum."""
+        tref = Path(self.app.ApplicationDirectory) / _VILIB_TREF
+        tr = self._vi(str(tref / "TRef Traverse for References.vi"))
+        tr.SetControlValue("VI Refnum", vi)
+        tr.SetControlValue("Class Name", "Control")
+        tr.SetControlValue("Traverse Target", 0)  # front panel
+        tr.Run(False)
+        lab = self._vi(str(tref / "Get GObject Label.vi"))
+        out: dict = {}
+        for r in tr.GetControlValue("References") or ():
+            lab.SetControlValue("GObject", r)
+            lab.Run(False)
+            out.setdefault(lab.GetControlValue("Object Label"), r)
+        return out
+
+    def _content_size(self, path: str) -> tuple[tuple[int, int], tuple[int, int]]:
+        """Pixel size of the front panel and block diagram pictures, to place new code below."""
+        try:
+            from PIL import Image as PILImage
+            _, imgs = self.vi_snapshot(path, True, True, False, False)
+            sizes = {p.stem[2:]: PILImage.open(p).size for p in imgs}
+            return sizes.get("p", (0, 0)), sizes.get("d", (0, 0))
+        except Exception:  # noqa: BLE001 - placement is cosmetic
+            return (0, 300), (0, 400)
+
+    def vi_edit(self, path: str, spec: dict, backup: bool, allow_broken: bool) -> dict:
+        from . import gen
+
+        path = check_vi_path(path)
+        if not RAW_GEN_VI.exists():
+            raise LabVIEWError(f"helper VI missing from the package: {RAW_GEN_VI}")
+        existing_map = spec.get("existing") or {}
+        if isinstance(existing_map, list):
+            existing_map = {n: n for n in existing_map}
+        if not isinstance(existing_map, dict):
+            raise LabVIEWError("\"existing\" maps spec names to front-panel labels, e.g. {\"x\": \"Gain\"}")
+        names = list(existing_map)
+        target = self._vi(path)
+        target._FlagAsMethod("SaveInstrument")
+        target._FlagAsMethod("Revert")
+        target._FlagAsMethod("GetLockState")
+        if _try(lambda: bool(target.FPModificationBitSet or target.BDModificationBitSet)):
+            raise LabVIEWError(f"{Path(path).name} has unsaved changes in LabVIEW. Save or revert them first.")
+        (fpw, fph), (bdw, bdh) = self._content_size(path)
+        script = gen.build({k: v for k, v in spec.items() if k != "existing"}, existing=names,
+                           origin=(30, bdh + 80), fp_origin=(30, fph + 60))
+        refs = []
+        if names:
+            found = self._fp_refs_by_label(target)
+            for n in names:
+                label = existing_map[n]
+                if label not in found:
+                    raise LabVIEWError(f"no control or indicator labelled {label!r} on {Path(path).name}. "
+                                       f"Labels: {sorted(k for k in found if k)}")
+                refs.append(found[label])
+        bak = None
+        if backup:
+            bdir = Path(path).parent / ".lvmcp-backup"
+            bdir.mkdir(exist_ok=True)
+            bak = bdir / f"{Path(path).stem}.{time.strftime('%Y%m%d-%H%M%S')}{Path(path).suffix}"
+            shutil.copy2(path, bak)
+        before = self._sink_count(path)
+        status, code, source = self._gen_script(target, script.xml, script.type_strings,
+                                                script.data_strings, refs=refs, raw=True)
+        if status:
+            _try(lambda: target.Revert())
+            hint = _GEN_ERRORS.get(code, "")
+            raise LabVIEWError(f"LabVIEW rejected the edit (error {code}){': ' + hint if hint else ''}. "
+                               f"The VI was reverted and not saved.\nLabVIEW said: {_strip_html(str(source))}")
+        broken = target.ExecState == 0
+        after = self._sink_count(path)
+        if not broken and before is not None and after is not None and after - before < len(script.wires):
+            # LabVIEW drops a wire it cannot make (e.g. a second source into a wired indicator)
+            # without an error; the dangling remains would be saved.
+            _try(lambda: target.Revert())
+            raise LabVIEWError(
+                f"LabVIEW connected only {after - before} of the {len(script.wires)} requested wires "
+                "(a wire into an input that is already wired, or between incompatible terminals, is "
+                "silently dropped). The VI was reverted and not saved. Check the spec with vi_dump.")
+        if broken and not allow_broken:
+            _try(lambda: target.Revert())
+            raise LabVIEWError(
+                "The edit made the VI broken (for example two sources wired to one indicator, an unwired "
+                "required input, or mismatched types), so it was reverted and not saved. Fix the spec, or "
+                "pass allow_broken=true to save it anyway and inspect it with vi_snapshot.")
+        for label, value in script.defaults.items():
+            target.SetControlValue(label, value)
+        if script.defaults:
+            target._FlagAsMethod("MakeCurValueDefault")
+            target.MakeCurValueDefault()
+        target.SaveInstrument(path, False, False)
+        return {"path": path, "backup": str(bak) if bak else None,
+                "exec_state": EXEC_STATES.get(target.ExecState, target.ExecState),
+                "added_front_panel": script.labels}
+
+    def _dfir_text(self, path: str) -> str:
+        if not DFIR_VI.exists():
+            raise LabVIEWError(f"helper VI missing from the package: {DFIR_VI}")
+        target = self._vi(path)
+        h = self._vi(str(DFIR_VI))
+        h.SetControlValue("reference", target)
+        h.SetControlValue("VI Variable Name", "vi")
+        h.SetControlValue("Indentation Level", 0)
+        h.Run(False)
+        status, code, source = h.GetControlValue("error out")
+        if status:
+            if code == 1040:
+                raise LabVIEWError(f"{Path(path).name} is password-protected; its block diagram cannot be read.")
+            raise LabVIEWError(f"LabVIEW could not compile {Path(path).name} for reading (error {code}). "
+                               f"A broken VI cannot be read; fix it first. {_strip_html(str(source))}")
+        return h.GetControlValue("CPP Output") or ""
+
+    def _sink_count(self, path: str) -> int | None:
+        """Number of wire ends that land on a terminal, or None when the diagram cannot be read."""
+        from . import dfir
+        try:
+            g = dfir.parse(self._dfir_text(path))
+        except (LabVIEWError, ValueError):
+            return None
+        return sum(len(w["to"]) for w in g["wires"])
+
+    def _connector_labels(self, path: str) -> list[str] | None:
+        """A VI's connector-pane labels in the order DFIR numbers a subVI node's terminals."""
+        from . import dfir
+        cache = self.__dict__.setdefault("_conpane_cache", {})
+        if path not in cache:
+            try:
+                g = dfir.parse(self._dfir_text(path))
+                terms = [(n["conpane_index"], n.get("label", "")) for n in g["nodes"]
+                         if n["kind"] in ("control", "indicator") and n.get("conpane_index", -1) >= 0
+                         and "in" not in n]
+                cache[path] = [lab for _, lab in sorted(terms)]
+            except LabVIEWError:
+                cache[path] = None
+        return cache[path]
+
+    def vi_dump(self, path: str) -> dict:
+        from . import catalog, dfir
+        text = self._dfir_text(check_vi_path(path))
+        g = dfir.parse(text, catalog.load(self.app.ApplicationDirectory), self._connector_labels)
+        return {"vi": str(path), **g}
+
 
 VIS_DIR = Path(__file__).parent / "vis"
 BOOTSTRAP_VI = VIS_DIR / "lvmcp_gen_script.vi"
 BLANK_VI = VIS_DIR / "lvmcp_blank.vi"
+DFIR_VI = VIS_DIR / "lvmcp_dfir.vi"
+RAW_GEN_VI = VIS_DIR / "lvmcp_gen_script_raw.vi"
+_VILIB_TREF = Path("vi.lib") / "Utility" / "traverseref.llb"
 _GEN_ERRORS = {
     1063: "a wire names a terminal that does not exist on that node. Call function_terminals(name) "
           "for a function's exact terminal names; a subVI's terminals are its control/indicator labels "

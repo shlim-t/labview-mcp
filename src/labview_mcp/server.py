@@ -26,6 +26,8 @@ mcp = MCPServer(
         "To build a new VI: vi_create with a spec of controls, indicators, constants, functions, "
         "subVIs, structures and wires (lv_functions / function_terminals give exact function and "
         "terminal names); check the returned diagram picture, then test with vi_run.\n"
+        "To read a diagram as data: vi_dump (nodes, wires, constant values). To change an existing "
+        "VI: vi_edit adds code wired to its existing controls/indicators, with a backup.\n"
         "All paths must be absolute. vi_run executes code on the user's machine and may drive "
         "real instruments; only run VIs the user asked you to run."
     ),
@@ -200,8 +202,54 @@ async def vi_create(
         f"Created {res['path']} (state: {res['exec_state']}).\n"
         f"Front panel: {res['front_panel']}\n"
         f"Connector pane (callers wire these labels): {res['connector_pane']}\n"
-        "Check the diagram picture: a wire that LabVIEW could not connect is simply missing. "
+        + (f"WARNING: {res['warning']}\n" if res.get("warning") else "")
+        + "Check the diagram picture: a wire that LabVIEW could not connect is simply missing. "
         "Then call vi_run to test."
+    ]
+    for p in imgs[:1]:
+        out.append(_image(p, 2000))
+    return out
+
+
+@mcp.tool()
+async def vi_dump(path: str) -> dict:
+    """The block diagram as a graph: every node (controls, indicators, constants with their values,
+    functions by palette name, subVIs by path, loops, cases with their frame values, tunnels,
+    shift registers), which diagram it sits in ("in": a structure id, "case_4#1" = frame 1), and
+    every wire with its source, sinks and data type.
+    Works for VIs built from common nodes. LabVIEW's exporter refuses some nodes (property and
+    invoke nodes, event structures, Express VIs, ...); then fall back to vi_text and vi_snapshot.
+    Broken and password-protected VIs cannot be read."""
+    return await _run(lv.vi_dump, path)
+
+
+@mcp.tool(structured_output=False)
+async def vi_edit(
+    path: str,
+    spec: dict[str, Any],
+    backup: bool = True,
+    allow_broken: bool = False,
+) -> list[Any]:
+    """Add code to an existing VI and wire it to the VI's existing controls/indicators. The rest of
+    the diagram is left as it is (no clean-up); new code is placed below it.
+
+    spec is the vi_create spec plus "existing": {spec name: front-panel label} naming existing
+    controls/indicators to wire to, e.g. to add y = Gain * 2 next to the current code:
+      {"existing": {"g": "Gain"},
+       "indicators": [{"name": "y", "type": "dbl"}],
+       "constants": [{"name": "two", "type": "dbl", "value": 2}],
+       "functions": [{"name": "m", "function": "Multiply"}],
+       "wires": [["g", "m.x"], ["two", "m.y"], ["m.x*y", "y"]]}
+    An existing control can feed any number of new inputs; an existing indicator that is already
+    wired cannot take a second source. New controls stay off the connector pane unless they set
+    "connector". A copy is saved to .lvmcp-backup/ next to the VI first (backup=false skips it).
+    If the edit leaves the VI broken it is reverted and not saved, unless allow_broken=true."""
+    res = await _run(lv.vi_edit, path, spec, backup, allow_broken)
+    text, imgs = await _run(lv.vi_snapshot, res["path"], False, True, False, False)
+    out: list[Any] = [
+        f"Edited {res['path']} (state: {res['exec_state']}). Backup: {res['backup']}.\n"
+        f"New front-panel objects: {res['added_front_panel']}\n"
+        "Check the picture, then vi_run to test."
     ]
     for p in imgs[:1]:
         out.append(_image(p, 2000))

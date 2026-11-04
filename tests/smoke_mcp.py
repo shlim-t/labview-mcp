@@ -10,7 +10,7 @@ import tempfile
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-EXPECTED = {"lv_status", "vi_info", "vi_text", "vi_snapshot", "vi_hierarchy", "vi_run",
+EXPECTED = {"lv_status", "vi_info", "vi_text", "vi_snapshot", "vi_hierarchy", "vi_run", "vi_dump", "vi_edit",
             "vi_create", "lv_functions", "function_terminals"}
 
 

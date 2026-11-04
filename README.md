@@ -1,10 +1,10 @@
 # labview-mcp
 
-An [MCP](https://modelcontextprotocol.io) server that lets AI coding agents — Claude Code, Codex, Cursor, and others — **read, render, run, and create NI LabVIEW VIs**.
+An [MCP](https://modelcontextprotocol.io) server that lets AI coding agents — Claude Code, Codex, Cursor, and others — **read, render, run, create, and edit NI LabVIEW VIs**.
 
 LabVIEW source code is a binary, graphical format. Text-based coding agents can't open a `.vi` file. labview-mcp acts as the agent's eyes and hands: it drives your installed LabVIEW over its ActiveX server and returns what the agent needs as text, images, and values.
 
-> Status: **v0.3.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth.
+> Status: **v0.4.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth. Existing VIs can be read as a graph (`vi_dump`, for VIs built from common nodes) and extended in place (`vi_edit`).
 
 ## What the agent can do
 
@@ -16,6 +16,8 @@ LabVIEW source code is a binary, graphical format. Text-based coding agents can'
 | `vi_snapshot` | PNG images of the block diagram, front panel, or connector pane. `all_frames=true` renders **every hidden case, sequence, and event frame**. |
 | `vi_hierarchy` | The subVI call tree. vi.lib, user.lib, and instr.lib are hidden by default. |
 | `vi_run` | Sets inputs, runs the VI, and returns all front-panel values. Stops VIs that don't finish within the time limit (UI loops). |
+| `vi_dump` | **The block diagram as a JSON graph**: every node (functions by palette name, constants with their values, subVIs, loops, case frames and their values, tunnels, shift registers) and every wire with its source, sinks, and data type. |
+| `vi_edit` | **Adds code to an existing VI**, wired to its existing controls and indicators by label. The rest of the diagram is left untouched. It backs up the VI first, and reverts instead of saving if the result is broken or a wire could not be made. |
 | `lv_functions` | Searches the palette functions in your LabVIEW install by name. |
 | `function_terminals` | Exact terminal names of a function, **verified against LabVIEW's scripting engine** so the agent wires them right the first time. |
 | `vi_create` | **Builds a new VI** from a JSON spec: typed controls and indicators with defaults, constants, palette functions, subVI calls, For/While loops, shift registers, case structures, and wires. LabVIEW's Clean Up Diagram tidies the result, and the tool returns a picture of it. |
@@ -26,6 +28,32 @@ Example prompts:
 - "Which subVIs write to the `Config` global?"
 - "Run `Scale.vi` with gain 2.5 and check `out` matches my Python reference."
 - "Make a VI that takes an array of readings and returns their sum and mean, then test it."
+- "In `Scale.vi`, also output `Gain` squared, then run it."
+
+### `vi_dump` output (excerpt)
+
+```json
+{"nodes": [{"id": "control_2", "kind": "control", "label": "data", "type": "dbl[]", "conpane_index": 11},
+           {"id": "divide_7", "kind": "function", "function": "Divide"},
+           {"id": "case_structure_4", "kind": "case", "frames": [{"index": 0, "values": ["apple"]},
+                                                                  {"index": 2, "values": [], "default": true}]}],
+ "wires": [{"from": "add_array_elements_5.sum", "to": ["divide_7.x"], "type": "dbl"},
+           {"from": "tunnel_9.outer", "to": ["indicator_3"], "type": "dbl"}]}
+```
+
+`vi_dump` uses LabVIEW's internal dataflow exporter, which refuses some node types, such as property and invoke nodes, event structures, and Express VIs. For those VIs, use `vi_text` and `vi_snapshot`. Password-protected VIs cannot be read, by design.
+
+### `vi_edit` spec
+
+It takes the `vi_create` spec plus `"existing"`, which maps spec names to front-panel labels already on the VI:
+
+```json
+{"existing":   {"g": "Gain"},
+ "indicators": [{"name": "y", "type": "dbl"}],
+ "constants":  [{"name": "two", "type": "dbl", "value": 2}],
+ "functions":  [{"name": "m", "function": "Multiply"}],
+ "wires":      [["g", "m.x"], ["two", "m.y"], ["m.x*y", "y"]]}
+```
 
 ### `vi_create` spec
 
@@ -76,7 +104,7 @@ Types: `dbl sgl i8 i16 i32 i64 u8 u16 u32 u64 bool string path error`, arrays (`
 - Windows with LabVIEW installed. Tested with **LabVIEW 2026 Q3 (64-bit)**. Community Edition works for personal and non-commercial use.
 - In LabVIEW, open **Tools ▸ Options ▸ VI Server** and enable **ActiveX**.
 - Python ≥ 3.10.
-- `vi_create` uses helper VIs saved in **LabVIEW 2026**. Older versions are on the roadmap.
+- `vi_create`, `vi_dump`, and `vi_edit` use helper VIs saved in **LabVIEW 2026**. Older versions are on the roadmap.
 
 ## Install
 
@@ -95,13 +123,16 @@ agent ──MCP/stdio──▶ labview-mcp ──ActiveX (COM)──▶ LabVIEW.
                                                    ├─ PrintVIToHTML    → vi_snapshot
                                                    ├─ CalleesPaths     → vi_hierarchy
                                                    ├─ Set/Run/GetValue → vi_run
-                                                   └─ helper VI        → vi_create
+                                                   ├─ helper VIs       → vi_create, vi_edit
+                                                   └─ helper VI        → vi_dump
 ```
 
 - All COM calls run on a single dedicated thread.
 - `vi_snapshot` temporarily changes LabVIEW's print options to render hidden frames. It always restores them afterwards.
 - Read tools never modify or save VI files. `vi_create` only writes the new file you name, and it refuses to overwrite an existing file unless you pass `overwrite=true`.
-- `vi_create` translates the spec into LabVIEW's internal diagram-scripting XML. A small helper VI shipped in the package (`vis/lvmcp_gen_script.vi`) runs that script on a blank VI. The spec is validated in Python first, so malformed input never reaches LabVIEW.
+- `vi_edit` copies the VI to `.lvmcp-backup/` next to it before editing. It refuses to touch a VI with unsaved changes in LabVIEW. It reverts instead of saving if the edit breaks the VI or LabVIEW silently drops a requested wire.
+- `vi_create` and `vi_edit` translate the spec into LabVIEW's internal diagram-scripting XML. Small helper VIs shipped in the package (`vis/`) run that script. The spec is validated in Python first, so malformed input never reaches LabVIEW.
+- `vi_dump` runs LabVIEW's dataflow (DFIR) exporter through a helper VI and parses its output.
 
 ## Safety
 
@@ -109,7 +140,10 @@ agent ──MCP/stdio──▶ labview-mcp ──ActiveX (COM)──▶ LabVIEW.
 
 ## Roadmap
 
-- [ ] `vi_dump`: full block-diagram graph (nodes, wires, constants) as JSON, via a VI Scripting helper VI.
+- [x] `vi_dump`: block-diagram graph (nodes, wires, constants) as JSON.
+- [x] `vi_edit`: add code wired to an existing VI's controls and indicators, with backup and revert.
+- [ ] `vi_edit`: wire into existing structures and nodes, delete and replace code.
+- [ ] `vi_dump` for VIs with property nodes and event structures.
 - [ ] `vi_diff`: a semantic diff between two versions of a VI, for code review on binary files.
 - [ ] LabVIEWCLI tools: build specs, mass compile, VI Analyzer, unit tests.
 - [x] `vi_create`: new VIs with controls, constants, functions, subVIs, and wires.
@@ -117,7 +151,6 @@ agent ──MCP/stdio──▶ labview-mcp ──ActiveX (COM)──▶ LabVIEW.
 - [x] `vi_create`: connector pane and error clusters, so generated VIs can call each other.
 - [ ] `vi_create`: visible labels, constant widths, event structures, enums.
 - [ ] Helper VIs saved for older LabVIEW versions.
-- [ ] Scripted edits: duplicate a case, set constants, rename, create globals. Each edit makes a backup first.
 
 ## License
 

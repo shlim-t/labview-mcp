@@ -216,6 +216,7 @@ class Script:
     labels: dict[str, str]  # node name -> front-panel label for controls/indicators
     defaults: dict[str, Any]  # front-panel label -> default value (set after generation)
     connector: dict[str, str]  # front-panel label -> connector pane slot
+    wires: list = None  # (driver, sink) pairs in LabVIEW terminal syntax
 
 
 @dataclass
@@ -246,7 +247,7 @@ class _Builder:
         if name in self.nodes:
             raise SpecError(f"duplicate name {name!r}")
         self.nodes[name] = _Node(name, kind, container, spec, owner)
-        if kind not in ("shiftreg", "tunnel"):
+        if kind not in ("shiftreg", "tunnel", "existing"):
             self.children[container].append(name)
 
     def collect(self, d: dict, container: str):
@@ -369,7 +370,7 @@ class _Builder:
         for a, z in wires:
             ia = self.item_in(a.partition(".")[0], container)
             iz = self.item_in(z.partition(".")[0], container)
-            if ia and iz and ia != iz:
+            if ia in depth and iz in depth and ia != iz:
                 edges.add((ia, iz))
         for _ in range(len(items)):
             changed = False
@@ -514,10 +515,11 @@ def _fp_height(t: LVType) -> int:
     return 45
 
 
-def _assign_connector(controls: list[dict]) -> dict[str, str]:
+def _assign_connector(controls: list[dict], default="auto") -> dict[str, str]:
     """Front-panel name -> slot. Controls fill the left side then the top, indicators the right side
     then the bottom, in spec order; "connector": "left3" pins a slot, false leaves it unwired."""
     taken: dict[str, str] = {}
+    controls = [dict(c, connector=c.get("connector", default)) for c in controls]
     for c in controls:
         slot = c.get("connector", "auto")
         if slot in (False, None, "none"):
@@ -546,13 +548,18 @@ def _assign_connector(controls: list[dict]) -> dict[str, str]:
     return taken
 
 
-def build(spec: dict) -> Script:
+def build(spec: dict, existing: list[str] | None = None, origin=(30, 30), fp_origin=(30, 30)) -> Script:
+    """existing: names (in ObjRefsIn order) of objects already on the diagram that the spec wires to;
+    used by vi_edit. New controls then stay off the connector pane unless they ask for a slot."""
     if not isinstance(spec, dict):
         raise SpecError("spec must be an object")
-    unknown = set(spec) - {"controls", "indicators", "wires", *_CONTENT_KEYS}
+    unknown = set(spec) - {"controls", "indicators", "wires", "existing", *_CONTENT_KEYS}
     if unknown:
         raise SpecError(f"unknown spec keys: {sorted(unknown)}")
     b = _Builder()
+    existing = list(existing or [])
+    for n in existing:
+        b.add(n, "existing", "", {})
     controls = [dict(c, _ind=False) for c in spec.get("controls", []) or []] + \
                [dict(c, _ind=True) for c in spec.get("indicators", []) or []]
     labels, defaults = {}, {}
@@ -564,7 +571,7 @@ def build(spec: dict) -> Script:
                 raise SpecError(f"indicator {c['name']!r} cannot have a default")
             defaults[labels[c["name"]]] = c["default"]
     b.collect(spec, "")
-    if not any(n.kind not in ("control", "indicator") for n in b.nodes.values()):
+    if not existing and not any(n.kind not in ("control", "indicator") for n in b.nodes.values()):
         # A diagram holding only terminals is saved by LabVIEW as a file it cannot reopen.
         raise SpecError("the diagram needs at least one constant, function, subVI or structure")
 
@@ -577,15 +584,17 @@ def build(spec: dict) -> Script:
         wires.append((b.resolve(w[0]), b.resolve(w[1])))
 
     pos: dict[str, tuple[int, int]] = {}
-    b.place("", (30, 30), wires, pos)
+    b.place("", origin, wires, pos)
 
-    conpane = _assign_connector(controls)
+    conpane = _assign_connector(controls, default=False if existing else "auto")
     out = ["<Script>"]
-    fp_y = {False: 30, True: 30}  # labels sit above the control, so start below the top edge
+    for i, n in enumerate(existing):
+        out.append(f"<Control name={quoteattr(n)} in=\"{i}\"></Control>")
+    fp_y = {False: fp_origin[1], True: fp_origin[1]}  # labels sit above the control
     for c in controls:
         ti = b.add_type(c.get("type", "dbl"), c.get("default"))
         n = c["name"]
-        fp = (350 if c["_ind"] else 30, fp_y[c["_ind"]])
+        fp = (fp_origin[0] + (320 if c["_ind"] else 0), fp_y[c["_ind"]])
         fp_y[c["_ind"]] += _fp_height(parse_type(c.get("type", "dbl"))) + 25
         out.append(f"<Control name={quoteattr(n)} typeindex=\"{ti}\""
                    + (" indicator=\"TRUE\"" if c["_ind"] else "")
@@ -605,4 +614,5 @@ def build(spec: dict) -> Script:
         labels=labels,
         defaults=defaults,
         connector={labels[n]: slot for n, slot in conpane.items()},
+        wires=wires,
     )
