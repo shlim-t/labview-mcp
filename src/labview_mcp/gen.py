@@ -226,6 +226,7 @@ class _Node:
     container: str   # id of the diagram/body/frame holding it ("" = top-level diagram)
     spec: dict
     owner: str = ""  # structure a shift register / tunnel belongs to
+    bind: int | None = None  # index into ObjRefsIn for an object that already exists (vi_edit)
 
 
 def _pos(x, y) -> str:
@@ -249,6 +250,38 @@ class _Builder:
         self.nodes[name] = _Node(name, kind, container, spec, owner)
         if kind not in ("shiftreg", "tunnel", "existing"):
             self.children[container].append(name)
+
+    def add_existing(self, name: str, kind: str, bind: int, extra: dict):
+        """An object already on the diagram, bound to ObjRefsIn[bind]. kind: "existing" (a front-panel
+        terminal), constant, function, subvi, for, while or case. Loops may get new contents; cases
+        get new contents per frame index via {"cases": {"1": {...contents}}}."""
+        self.add(name, kind, "", extra or {})
+        n = self.nodes[name]
+        n.bind = bind
+        self.children[""].remove(name) if name in self.children[""] else None
+        extra = extra or {}
+        if kind in ("for", "while"):
+            self.owner_of[name] = name
+            self.children[name] = []
+            self.collect(extra, name)
+        elif kind == "case":
+            frames = extra.get("cases") or {}
+            if not isinstance(frames, dict):
+                raise SpecError(f"existing case {name!r}: \"cases\" maps a frame index to contents, "
+                                "e.g. {\"1\": {\"functions\": [...]}}")
+            n.spec["_frames"] = []
+            for k, contents in frames.items():
+                try:
+                    idx = int(k)
+                except ValueError:
+                    raise SpecError(f"existing case {name!r}: frame index {k!r} is not a number") from None
+                fid = f"{name}#{idx}"
+                self.owner_of[fid] = name
+                self.children[fid] = []
+                n.spec["_frames"].append(idx)
+                self.collect(contents or {}, fid)
+        elif any(k in extra for k in _CONTENT_KEYS):
+            raise SpecError(f"existing {kind} {name!r} cannot hold new contents")
 
     def collect(self, d: dict, container: str):
         for c in d.get("constants", []) or []:
@@ -406,7 +439,28 @@ class _Builder:
 
     def bodies(self, name: str) -> list[str]:
         n = self.nodes[name]
-        return [name] if n.kind in ("for", "while") else [f"{name}#{i}" for i in range(len(n.spec["cases"]))]
+        if n.kind in ("for", "while"):
+            return [name]
+        if n.bind is not None:
+            return [f"{name}#{i}" for i in n.spec.get("_frames", [])]
+        return [f"{name}#{i}" for i in range(len(n.spec["cases"]))]
+
+    _BIND_TAG = {"existing": "Control", "constant": "Constant", "function": "Function",
+                 "subvi": "SubVI", "for": "Structure", "while": "Structure", "case": "MultiframeStructure"}
+
+    def emit_bindings(self, pos, wires, out: list):
+        """Name the existing objects (ObjRefsIn order) and add new contents inside existing structures."""
+        for n in sorted((m for m in self.nodes.values() if m.bind is not None), key=lambda m: m.bind):
+            tag = self._BIND_TAG[n.kind]
+            out.append(f"<{tag} name={quoteattr(n.name)} in=\"{n.bind}\">")
+            if n.kind in ("for", "while"):
+                self.emit(n.name, pos, wires, out)
+            elif n.kind == "case":
+                for i in n.spec.get("_frames", []):
+                    out.append(f"<Frame name={quoteattr(f'{n.name}_frame{i}')} index=\"{i}\">")
+                    self.emit(f"{n.name}#{i}", pos, wires, out)
+                    out.append("</Frame>")
+            out.append(f"</{tag}>")
 
     def size(self, name: str, wires) -> tuple[int, int]:
         n = self.nodes[name]
@@ -548,9 +602,10 @@ def _assign_connector(controls: list[dict], default="auto") -> dict[str, str]:
     return taken
 
 
-def build(spec: dict, existing: list[str] | None = None, origin=(30, 30), fp_origin=(30, 30)) -> Script:
-    """existing: names (in ObjRefsIn order) of objects already on the diagram that the spec wires to;
-    used by vi_edit. New controls then stay off the connector pane unless they ask for a slot."""
+def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(30, 30)) -> Script:
+    """existing: objects already on the diagram that the spec refers to, in ObjRefsIn order; each a
+    name (a front-panel terminal) or {"name", "kind", "spec"} (see _Builder.add_existing). Used by
+    vi_edit. New controls then stay off the connector pane unless they ask for a slot."""
     if not isinstance(spec, dict):
         raise SpecError("spec must be an object")
     unknown = set(spec) - {"controls", "indicators", "wires", "existing", *_CONTENT_KEYS}
@@ -558,8 +613,10 @@ def build(spec: dict, existing: list[str] | None = None, origin=(30, 30), fp_ori
         raise SpecError(f"unknown spec keys: {sorted(unknown)}")
     b = _Builder()
     existing = list(existing or [])
-    for n in existing:
-        b.add(n, "existing", "", {})
+    for i, e in enumerate(existing):
+        if isinstance(e, str):
+            e = {"name": e, "kind": "existing"}
+        b.add_existing(e["name"], e.get("kind", "existing"), i, e.get("spec") or {})
     controls = [dict(c, _ind=False) for c in spec.get("controls", []) or []] + \
                [dict(c, _ind=True) for c in spec.get("indicators", []) or []]
     labels, defaults = {}, {}
@@ -585,11 +642,14 @@ def build(spec: dict, existing: list[str] | None = None, origin=(30, 30), fp_ori
 
     pos: dict[str, tuple[int, int]] = {}
     b.place("", origin, wires, pos)
+    for n in b.nodes.values():  # new contents of existing structures, relative to the structure
+        if n.bind is not None and n.kind in ("for", "while", "case"):
+            for body in b.bodies(n.name):
+                b.place(body, (PAD_X, PAD_TOP + 60), wires, pos)
 
     conpane = _assign_connector(controls, default=False if existing else "auto")
     out = ["<Script>"]
-    for i, n in enumerate(existing):
-        out.append(f"<Control name={quoteattr(n)} in=\"{i}\"></Control>")
+    b.emit_bindings(pos, wires, out)
     fp_y = {False: fp_origin[1], True: fp_origin[1]}  # labels sit above the control
     for c in controls:
         ti = b.add_type(c.get("type", "dbl"), c.get("default"))

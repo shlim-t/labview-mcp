@@ -203,6 +203,10 @@ def _palette_name(cls: str, catalog: dict[str, list[str]]) -> str | None:
     for c in cands:
         if c.lower() in low:
             return low[c.lower()]
+    for c in cands:  # palette names with a unit suffix, e.g. WaitPrimitive -> "Wait (ms)"
+        hits = sorted(k for k in catalog if k.lower().startswith(c.lower() + " ("))
+        if len(hits) == 1:
+            return hits[0]
     return None
 
 
@@ -267,8 +271,11 @@ def parse(text: str, catalog: dict[str, list[str]] | None = None, subvi_terms=No
                 if ccls == "VirtualInstrument":
                     continue
                 node = {"id": _short(ref), "class": ccls, "in": diagrams.get(diag, "")}
+                if _sid:
+                    # The object's UID in LabVIEW (for constants, the UID of its data object).
+                    node["uid"] = int(_sid)
                 if ccls == "Wire":
-                    wires[ref] = {"in": node["in"]}
+                    wires[ref] = {"in": node["in"], "uid": node.get("uid")}
                     continue
                 if ccls in ("Control", "Indicator"):
                     node["kind"] = ccls.lower()
@@ -418,9 +425,10 @@ def parse(text: str, catalog: dict[str, list[str]] | None = None, subvi_terms=No
     for src, st_, dst, dt, o, ln in conns:
         st_, dt = int(st_), int(dt)
         if src in wires and dst:
-            edges.setdefault(src, {"from": None, "to": [], "type": None})["to"].append(term_name(dst, dt))
+            edges.setdefault(src, {"from": None, "to": [], "type": None, "uid": wires[src]["uid"]})["to"].append(
+                term_name(dst, dt))
         elif dst in wires and src:
-            e = edges.setdefault(dst, {"from": None, "to": [], "type": None})
+            e = edges.setdefault(dst, {"from": None, "to": [], "type": None, "uid": wires[dst]["uid"]})
             e["from"] = term_name(src, st_)
             e["type"] = type_of(o, ln)
         elif src and not dst:

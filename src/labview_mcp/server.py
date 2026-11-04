@@ -216,7 +216,8 @@ async def vi_dump(path: str) -> dict:
     """The block diagram as a graph: every node (controls, indicators, constants with their values,
     functions by palette name, subVIs by path, loops, cases with their frame values, tunnels,
     shift registers), which diagram it sits in ("in": a structure id, "case_4#1" = frame 1), and
-    every wire with its source, sinks and data type.
+    every wire with its source, sinks and data type. Node ids are what vi_edit's "remove" and
+    "existing" take; they are renumbered after every edit, so dump again before the next one.
     Works for VIs built from common nodes. LabVIEW's exporter refuses some nodes (property and
     invoke nodes, event structures, Express VIs, ...); then fall back to vi_text and vi_snapshot.
     Broken and password-protected VIs cannot be read."""
@@ -229,26 +230,37 @@ async def vi_edit(
     spec: dict[str, Any],
     backup: bool = True,
     allow_broken: bool = False,
+    rewire: bool = False,
 ) -> list[Any]:
-    """Add code to an existing VI and wire it to the VI's existing controls/indicators. The rest of
-    the diagram is left as it is (no clean-up); new code is placed below it.
+    """Change an existing VI: remove nodes, add code, and wire it to what is already there, including
+    inside existing loops and case frames. The rest of the diagram keeps its layout. Call vi_dump
+    first to get node ids.
 
-    spec is the vi_create spec plus "existing": {spec name: front-panel label} naming existing
-    controls/indicators to wire to, e.g. to add y = Gain * 2 next to the current code:
-      {"existing": {"g": "Gain"},
-       "indicators": [{"name": "y", "type": "dbl"}],
-       "constants": [{"name": "two", "type": "dbl", "value": 2}],
+    spec = the vi_create spec plus:
+      "remove": ["increment_4", ...]   vi_dump node ids to delete, with their wires
+      "existing": {spec name: what}    objects already in the VI that the spec refers to:
+          "Gain"                         a front-panel control/indicator by label
+          {"node": "multiply_7"}         a vi_dump node (function, subVI, constant, loop, case)
+          {"node": "for_loop_3", "functions": [...], ...}       new code inside an existing loop
+          {"node": "case_structure_5", "cases": {"1": {...}}}   new code inside case frame 1
+    Existing nodes are wired like new ones ("m.x", "L.i", "C.selector"). Code put in a case frame
+    may only be wired to code in that frame and to existing objects; crossing the border makes a
+    tunnel. Example, replace out = x + 1 with out = x * 3:
+      {"remove": ["increment_4"], "existing": {"x": "x", "o": "out"},
+       "constants": [{"name": "k", "type": "dbl", "value": 3}],
        "functions": [{"name": "m", "function": "Multiply"}],
-       "wires": [["g", "m.x"], ["two", "m.y"], ["m.x*y", "y"]]}
-    An existing control can feed any number of new inputs; an existing indicator that is already
-    wired cannot take a second source. New controls stay off the connector pane unless they set
-    "connector". A copy is saved to .lvmcp-backup/ next to the VI first (backup=false skips it).
-    If the edit leaves the VI broken it is reverted and not saved, unless allow_broken=true."""
-    res = await _run(lv.vi_edit, path, spec, backup, allow_broken)
+       "wires": [["x", "m.x"], ["k", "m.y"], ["m.x*y", "o"]]}
+    An input that is already wired cannot take a second source (remove its node first). New
+    controls stay off the connector pane unless they set "connector". rewire=true deletes with
+    LabVIEW's Quick Drop "Remove and Rewire" (joins loose ends of matching type) instead.
+    A copy is saved to .lvmcp-backup/ next to the VI first (backup=false skips it). If the edit
+    leaves the VI broken, or a requested wire could not be made, the VI is reverted and not saved
+    (allow_broken=true saves a broken result anyway)."""
+    res = await _run(lv.vi_edit, path, spec, backup, allow_broken, rewire)
     text, imgs = await _run(lv.vi_snapshot, res["path"], False, True, False, False)
     out: list[Any] = [
         f"Edited {res['path']} (state: {res['exec_state']}). Backup: {res['backup']}.\n"
-        f"New front-panel objects: {res['added_front_panel']}\n"
+        f"Removed: {res.get('removed', 0)} node(s). New front-panel objects: {res['added_front_panel']}\n"
         "Check the picture, then vi_run to test."
     ]
     for p in imgs[:1]:

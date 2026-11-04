@@ -69,5 +69,72 @@ try:
 except LabVIEWError as e:
     check("unknown label rejected", "Gain" in str(e), str(e)[:80])
 
+# replace a node: out = x + 1  ->  out = x * 3
+rep = os.path.join(D, "replace.vi")
+call(lv.vi_create, rep, {
+    "controls": [{"name": "x", "type": "dbl", "default": 3}],
+    "indicators": [{"name": "out", "type": "dbl"}],
+    "functions": [{"name": "inc", "function": "Increment"}],
+    "wires": [["x", "inc.x"], ["inc.x+1", "out"]]}, True, "")
+inc_id = next(n["id"] for n in call(lv.vi_dump, rep)["nodes"] if n.get("function") == "Increment")
+res = call(lv.vi_edit, rep, {
+    "remove": [inc_id],
+    "existing": {"x": "x", "o": "out"},
+    "constants": [{"name": "k", "type": "dbl", "value": 3}],
+    "functions": [{"name": "m", "function": "Multiply"}],
+    "wires": [["x", "m.x"], ["k", "m.y"], ["m.x*y", "o"]]}, False, False)
+vals = call(lv.vi_run, rep, {}, None, 10)["values"]
+funcs = [n.get("function") for n in call(lv.vi_dump, rep)["nodes"] if n["kind"] == "function"]
+check("replace node", vals.get("out") == 9.0 and funcs == ["Multiply"], f"{vals} {funcs}")
+
+# add code inside an existing For Loop
+loop = os.path.join(D, "loop.vi")
+call(lv.vi_create, loop, {
+    "controls": [{"name": "n", "type": "i32", "default": 4}],
+    "indicators": [{"name": "sq", "type": "i32[]"}],
+    "structures": [{"name": "L", "type": "for_loop", "functions": [{"name": "m", "function": "Multiply"}]}],
+    "wires": [["n", "L.N"], ["L.i", "m.x"], ["L.i", "m.y"], ["m.x*y", "sq"]]}, True, "")
+loop_id = next(n["id"] for n in call(lv.vi_dump, loop)["nodes"] if n["kind"] == "for_loop")
+call(lv.vi_edit, loop, {
+    "existing": {"L": {"node": loop_id, "functions": [{"name": "inc", "function": "Increment"}]}},
+    "indicators": [{"name": "p1", "type": "i32[]", "label": "plus one"}],
+    "wires": [["L.i", "inc.x"], ["inc.x+1", "p1"]]}, False, False)
+vals = call(lv.vi_run, loop, {}, None, 10)["values"]
+check("add inside loop", vals.get("sq") == [0, 1, 4, 9] and vals.get("plus one") == [1, 2, 3, 4], vals)
+
+# add code inside one frame of an existing case structure
+case = os.path.join(D, "case.vi")
+call(lv.vi_create, case, {
+    "controls": [{"name": "s", "type": "bool", "default": True}],
+    "indicators": [{"name": "r", "type": "dbl"}],
+    "structures": [{"name": "C", "type": "case", "output_tunnels": ["t"], "cases": [
+        {"value": True, "constants": [{"name": "a", "type": "dbl", "value": 1}]},
+        {"value": False, "constants": [{"name": "b", "type": "dbl", "value": 2}]}]}],
+    "wires": [["s", "C.selector"], ["a", "t"], ["b", "t"], ["t", "r"]]}, True, "")
+case_id = next(n["id"] for n in call(lv.vi_dump, case)["nodes"] if n["kind"] == "case")
+call(lv.vi_edit, case, {
+    "existing": {"C": {"node": case_id, "cases": {"0": {
+        "constants": [{"name": "ms", "type": "i32", "value": 1}],
+        "functions": [{"name": "w", "function": "Wait (ms)"}]}}}},
+    "wires": [["ms", "w.milliseconds to wait"]]}, False, False)
+g = call(lv.vi_dump, case)
+waits = [n for n in g["nodes"] if n.get("function") == "Wait (ms)"]
+vals = call(lv.vi_run, case, {}, None, 10)["values"]
+check("add inside case frame", len(waits) == 1 and waits[0]["in"].endswith("#0") and vals.get("r") == 1.0,
+      f"{[(w['id'], w['in']) for w in waits]} {vals}")
+
+# new code in a case frame wired to an existing control outside the case (crosses the border)
+call(lv.vi_edit, case, {
+    "existing": {"sel": "s", "C": {"node": next(n["id"] for n in call(lv.vi_dump, case)["nodes"]
+                                                  if n["kind"] == "case"),
+                                   "cases": {"1": {"functions": [{"name": "nt", "function": "Not"}]}}}},
+    "wires": [["sel", "nt.x"]]}, False, False)
+g = call(lv.vi_dump, case)
+nots = [n for n in g["nodes"] if n.get("function") == "Not"]
+fed = [w for w in g["wires"] if any(t.startswith(nots[0]["id"]) for t in w["to"])] if nots else []
+vals = call(lv.vi_run, case, {"s": False}, None, 10)["values"]
+check("frame code wired across the border", len(nots) == 1 and nots[0]["in"].endswith("#1") and fed
+      and vals.get("r") == 2.0, f"{[(n['id'], n['in']) for n in nots]} {fed} {vals}")
+
 print(f"{'all passed' if not failed else f'{failed} failed'}; files in {D}")
 sys.exit(1 if failed else 0)

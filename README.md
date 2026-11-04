@@ -4,7 +4,7 @@ An [MCP](https://modelcontextprotocol.io) server that lets AI coding agents — 
 
 LabVIEW source code is a binary, graphical format. Text-based coding agents can't open a `.vi` file. labview-mcp acts as the agent's eyes and hands: it drives your installed LabVIEW over its ActiveX server and returns what the agent needs as text, images, and values.
 
-> Status: **v0.4.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth. Existing VIs can be read as a graph (`vi_dump`, for VIs built from common nodes) and extended in place (`vi_edit`).
+> Status: **v0.5.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth. Existing VIs can be read as a graph (`vi_dump`, for VIs built from common nodes) and changed in place (`vi_edit`: remove, replace, and add code, including inside existing loops and case frames).
 
 ## What the agent can do
 
@@ -17,7 +17,7 @@ LabVIEW source code is a binary, graphical format. Text-based coding agents can'
 | `vi_hierarchy` | The subVI call tree. vi.lib, user.lib, and instr.lib are hidden by default. |
 | `vi_run` | Sets inputs, runs the VI, and returns all front-panel values. Stops VIs that don't finish within the time limit (UI loops). |
 | `vi_dump` | **The block diagram as a JSON graph**: every node (functions by palette name, constants with their values, subVIs, loops, case frames and their values, tunnels, shift registers) and every wire with its source, sinks, and data type. |
-| `vi_edit` | **Adds code to an existing VI**, wired to its existing controls and indicators by label. The rest of the diagram is left untouched. It backs up the VI first, and reverts instead of saving if the result is broken or a wire could not be made. |
+| `vi_edit` | **Changes an existing VI in place.** It removes nodes, adds code, and wires to existing controls, nodes, loops, and case frames (by `vi_dump` id). The rest of the diagram keeps its layout. It backs up the VI first, and reverts instead of saving if the result is broken or a wire could not be made. |
 | `lv_functions` | Searches the palette functions in your LabVIEW install by name. |
 | `function_terminals` | Exact terminal names of a function, **verified against LabVIEW's scripting engine** so the agent wires them right the first time. |
 | `vi_create` | **Builds a new VI** from a JSON spec: typed controls and indicators with defaults, constants, palette functions, subVI calls, For/While loops, shift registers, case structures, and wires. LabVIEW's Clean Up Diagram tidies the result, and the tool returns a picture of it. |
@@ -45,15 +45,22 @@ Example prompts:
 
 ### `vi_edit` spec
 
-It takes the `vi_create` spec plus `"existing"`, which maps spec names to front-panel labels already on the VI:
+It takes the `vi_create` spec plus two keys:
+
+- `"remove"` lists `vi_dump` node ids to delete, together with their wires.
+- `"existing"` names objects already in the VI: a front-panel label, `{"node": id}` for any node, `{"node": loop_id, "functions": [...]}` to add code inside a loop, or `{"node": case_id, "cases": {"1": {...}}}` to add code inside a case frame.
+
+This spec replaces `out = x + 1` with `out = x * 3`:
 
 ```json
-{"existing":   {"g": "Gain"},
- "indicators": [{"name": "y", "type": "dbl"}],
- "constants":  [{"name": "two", "type": "dbl", "value": 2}],
- "functions":  [{"name": "m", "function": "Multiply"}],
- "wires":      [["g", "m.x"], ["two", "m.y"], ["m.x*y", "y"]]}
+{"remove":    ["increment_4"],
+ "existing":  {"x": "x", "o": "out"},
+ "constants": [{"name": "k", "type": "dbl", "value": 3}],
+ "functions": [{"name": "m", "function": "Multiply"}],
+ "wires":     [["x", "m.x"], ["k", "m.y"], ["m.x*y", "o"]]}
 ```
+
+Objects are matched by their LabVIEW UID, which `vi_dump` reports. Edits therefore hit exactly the node you named, even in a VI with many identical functions.
 
 ### `vi_create` spec
 
@@ -142,7 +149,8 @@ agent ──MCP/stdio──▶ labview-mcp ──ActiveX (COM)──▶ LabVIEW.
 
 - [x] `vi_dump`: block-diagram graph (nodes, wires, constants) as JSON.
 - [x] `vi_edit`: add code wired to an existing VI's controls and indicators, with backup and revert.
-- [ ] `vi_edit`: wire into existing structures and nodes, delete and replace code.
+- [x] `vi_edit`: remove and replace nodes; add code inside existing loops and case frames.
+- [ ] `vi_edit`: rename, move, and retype existing objects; add frames to cases.
 - [ ] `vi_dump` for VIs with property nodes and event structures.
 - [ ] `vi_diff`: a semantic diff between two versions of a VI, for code review on binary files.
 - [ ] LabVIEWCLI tools: build specs, mass compile, VI Analyzer, unit tests.

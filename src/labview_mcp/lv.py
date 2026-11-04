@@ -438,7 +438,7 @@ class LabVIEW:
         except Exception:  # noqa: BLE001 - placement is cosmetic
             return (0, 300), (0, 400)
 
-    def vi_edit(self, path: str, spec: dict, backup: bool, allow_broken: bool) -> dict:
+    def vi_edit(self, path: str, spec: dict, backup: bool, allow_broken: bool, rewire: bool = False) -> dict:
         from . import gen
 
         path = check_vi_path(path)
@@ -448,35 +448,173 @@ class LabVIEW:
         if isinstance(existing_map, list):
             existing_map = {n: n for n in existing_map}
         if not isinstance(existing_map, dict):
-            raise LabVIEWError("\"existing\" maps spec names to front-panel labels, e.g. {\"x\": \"Gain\"}")
-        names = list(existing_map)
+            raise LabVIEWError("\"existing\" maps spec names to objects already in the VI, e.g. "
+                               "{\"g\": \"Gain\", \"L\": {\"node\": \"for_loop_4\"}}")
+        remove = spec.get("remove") or []
+        if not isinstance(remove, list) or not all(isinstance(r, str) for r in remove):
+            raise LabVIEWError("\"remove\" is a list of vi_dump node ids, e.g. [\"multiply_18\"]")
+        self._uid_refs = {}
         target = self._vi(path)
         target._FlagAsMethod("SaveInstrument")
         target._FlagAsMethod("Revert")
-        target._FlagAsMethod("GetLockState")
         if _try(lambda: bool(target.FPModificationBitSet or target.BDModificationBitSet)):
             raise LabVIEWError(f"{Path(path).name} has unsaved changes in LabVIEW. Save or revert them first.")
+
+        # Resolve every reference to the VI's current objects before touching anything.
+        graph = None
+        if remove or any(isinstance(v, dict) and ("node" in v or "uid" in v) for v in existing_map.values()):
+            graph = self.vi_dump(path)
+        by_id = {n["id"]: n for n in (graph or {}).get("nodes", [])}
+
+        def node_of(key, where):
+            if key not in by_id:
+                raise LabVIEWError(f"{where}: no node {key!r} in vi_dump of {Path(path).name}. "
+                                   f"Node ids: {sorted(by_id)}")
+            return by_id[key]
+
+        bindings = []  # (spec name, kind for gen, how to find the ref, extra contents)
+        for name, ref in existing_map.items():
+            extra = {}
+            if isinstance(ref, dict):
+                extra = {k: v for k, v in ref.items() if k not in ("label", "node", "uid")}
+                if "label" in ref:
+                    ref = ref["label"]
+                elif "node" in ref or "uid" in ref:
+                    n = node_of(ref["node"], f"existing {name!r}") if "node" in ref else \
+                        next((m for m in by_id.values() if m.get("uid") == ref["uid"]), None)
+                    if n is None:
+                        raise LabVIEWError(f"existing {name!r}: no node with uid {ref['uid']}")
+                    if n["kind"] in ("control", "indicator"):
+                        ref = n.get("label", "")
+                    else:
+                        kind = _EDIT_KINDS.get(n["kind"])
+                        if not kind or "uid" not in n:
+                            raise LabVIEWError(f"existing {name!r}: a {n['kind']} cannot be bound; bind "
+                                               "the node it belongs to instead")
+                        bindings.append((name, kind, ("uid", n["uid"], n["kind"]), extra))
+                        continue
+            if not isinstance(ref, str):
+                raise LabVIEWError(f"existing {name!r}: give a front-panel label, {{\"node\": vi_dump id}} "
+                                   "or {\"uid\": n}")
+            if extra:
+                raise LabVIEWError(f"existing {name!r}: only loops and cases can hold new contents")
+            bindings.append((name, "existing", ("label", ref), {}))
+        remove_nodes = [node_of(r, "remove") for r in remove]
+        for n in remove_nodes:
+            if "uid" not in n or n["kind"] not in _EDIT_KINDS:
+                raise LabVIEWError(f"remove: {n['id']} ({n['kind']}) cannot be removed on its own; remove "
+                                   "the node or structure it belongs to")
+
+        # New code for case frames is generated directly on each frame's diagram, in its own script.
+        frame_jobs = []  # (case spec name, case uid, frame index, contents)
+        for name, kind, how, extra in bindings:
+            if kind == "case" and extra.get("cases"):
+                frames = extra.pop("cases")
+                if not isinstance(frames, dict):
+                    raise LabVIEWError(f"existing case {name!r}: \"cases\" maps a frame index to contents, "
+                                       "e.g. {\"1\": {\"functions\": [...]}}")
+                for k, contents in frames.items():
+                    try:
+                        frame_jobs.append((name, how[1], int(k), contents or {}))
+                    except ValueError:
+                        raise LabVIEWError(f"existing case {name!r}: frame index {k!r} is not a number") from None
+        bound_names = {b[0] for b in bindings}
+        frame_names = [_spec_names(job[3]) for job in frame_jobs]
+        main_wires, frame_wires = [], [[] for _ in frame_jobs]
+        for w in spec.get("wires", []) or []:
+            ends = [w.get("from"), w.get("to")] if isinstance(w, dict) else list(w) if isinstance(w, (list, tuple)) else []
+            nodes = [str(e).split(".")[0] for e in ends]
+            home = [i for i, names in enumerate(frame_names) if any(n in names for n in nodes)]
+            if not home:
+                main_wires.append(w)
+                continue
+            i = home[0]
+            for n in nodes:
+                if n not in frame_names[i] and n not in bound_names:
+                    raise LabVIEWError(
+                        f"wire {w!r}: code added to a case frame can only be wired to code in the same frame "
+                        "or to existing objects (\"existing\"), not to other new code")
+            frame_wires[i].append(w)
+        diagram_uid = {}
+        if frame_jobs:
+            diagram_uid = self._diagram_uids(path, target)
+            # Revert reloads the VI, so take a fresh reference.
+            target = self._vi(path)
+            target._FlagAsMethod("SaveInstrument")
+            target._FlagAsMethod("Revert")
+        for _, cuid, k, _ in frame_jobs:
+            if f"{cuid}#{k}" not in diagram_uid:
+                raise LabVIEWError(f"the case structure has no frame {k} (frames are numbered from 0 as in "
+                                   "vi_dump's \"frames\")")
+
         (fpw, fph), (bdw, bdh) = self._content_size(path)
-        script = gen.build({k: v for k, v in spec.items() if k != "existing"}, existing=names,
+        main_spec = {k: v for k, v in spec.items() if k not in ("existing", "remove")}
+        main_spec["wires"] = main_wires
+        script = gen.build(main_spec,
+                           existing=[{"name": b[0], "kind": b[1], "spec": b[3]} for b in bindings],
                            origin=(30, bdh + 80), fp_origin=(30, fph + 60))
-        refs = []
-        if names:
-            found = self._fp_refs_by_label(target)
-            for n in names:
-                label = existing_map[n]
-                if label not in found:
-                    raise LabVIEWError(f"no control or indicator labelled {label!r} on {Path(path).name}. "
-                                       f"Labels: {sorted(k for k in found if k)}")
-                refs.append(found[label])
+        frame_scripts = []
+        for (cname, cuid, k, contents), fw in zip(frame_jobs, frame_wires):
+            used = {str(e).split(".")[0] for w in fw for e in
+                    ([w.get("from"), w.get("to")] if isinstance(w, dict) else w)} & bound_names
+            sub_existing = [{"name": b[0], "kind": b[1], "spec": {}} for b in bindings if b[0] in used]
+            frame_scripts.append((cuid, k, [b[0] for b in bindings if b[0] in used],
+                                  gen.build({**contents, "wires": fw}, existing=sub_existing, origin=(40, 40))))
+
         bak = None
         if backup:
             bdir = Path(path).parent / ".lvmcp-backup"
             bdir.mkdir(exist_ok=True)
             bak = bdir / f"{Path(path).stem}.{time.strftime('%Y%m%d-%H%M%S')}{Path(path).suffix}"
             shutil.copy2(path, bak)
+
+        removed = 0
+        if remove_nodes:
+            items = [self._ref_for_uid(target, n["uid"], n["kind"]) for n in remove_nodes]
+            # Wires that touched the removed nodes (by vi_dump id prefix of their ends).
+            gone = {n["id"] for n in remove_nodes}
+            touching = {w["uid"] for w in graph["wires"] if w.get("uid") is not None and any(
+                end.split(".")[0].split("[")[0] in gone for end in [w["from"] or ""] + w["to"])}
+            try:
+                if rewire:
+                    # NI's Quick Drop remover: deletes and joins loose ends of matching type.
+                    self._remove(target, items)
+                else:
+                    # Plain delete: the node's wires first (else they would dangle), then the node.
+                    wires = self._uid_map(target, "Wire")
+                    self._delete(target, [r for u, r in wires.items() if u in touching])
+                    self._delete(target, items)
+            except LabVIEWError as e:
+                _try(lambda: target.Revert())
+                raise LabVIEWError(f"{e} The VI was reverted.") from None
+            self._uid_refs = {}
+            removed = len(items)
+
+        refs = []
+        fp = None
+        for name, kind, how, _ in bindings:
+            if how[0] == "label":
+                fp = fp if fp is not None else self._fp_refs_by_label(target)
+                if how[1] not in fp:
+                    _try(lambda: target.Revert())
+                    raise LabVIEWError(f"no control or indicator labelled {how[1]!r} on {Path(path).name}. "
+                                       f"Labels: {sorted(k for k in fp if k)}")
+                refs.append(fp[how[1]])
+            else:
+                refs.append(self._ref_for_uid(target, how[1], how[2]))
+
         before = self._sink_count(path)
         status, code, source = self._gen_script(target, script.xml, script.type_strings,
                                                 script.data_strings, refs=refs, raw=True)
+        ref_of = {b[0]: r for b, r in zip(bindings, refs)}
+        if not status and frame_scripts:
+            diags = self._uid_map(target, "Diagram", fresh=True)
+            for cuid, k, used, sub in frame_scripts:
+                status, code, source = self._gen_on_diagram(
+                    diags[diagram_uid[f"{cuid}#{k}"]], sub.xml, sub.type_strings, sub.data_strings,
+                    refs=[ref_of[n] for n in used])
+                if status:
+                    break
         if status:
             _try(lambda: target.Revert())
             hint = _GEN_ERRORS.get(code, "")
@@ -484,12 +622,13 @@ class LabVIEW:
                                f"The VI was reverted and not saved.\nLabVIEW said: {_strip_html(str(source))}")
         broken = target.ExecState == 0
         after = self._sink_count(path)
-        if not broken and before is not None and after is not None and after - before < len(script.wires):
+        n_wires = len(script.wires) + sum(len(fs[3].wires) for fs in frame_scripts)
+        if not broken and before is not None and after is not None and after - before < n_wires:
             # LabVIEW drops a wire it cannot make (e.g. a second source into a wired indicator)
             # without an error; the dangling remains would be saved.
             _try(lambda: target.Revert())
             raise LabVIEWError(
-                f"LabVIEW connected only {after - before} of the {len(script.wires)} requested wires "
+                f"LabVIEW connected only {after - before} of the {n_wires} requested wires "
                 "(a wire into an input that is already wired, or between incompatible terminals, is "
                 "silently dropped). The VI was reverted and not saved. Check the spec with vi_dump.")
         if broken and not allow_broken:
@@ -506,7 +645,96 @@ class LabVIEW:
         target.SaveInstrument(path, False, False)
         return {"path": path, "backup": str(bak) if bak else None,
                 "exec_state": EXEC_STATES.get(target.ExecState, target.ExecState),
-                "added_front_panel": script.labels}
+                "removed": removed, "added_front_panel": script.labels}
+
+    def _uid_map(self, vi, cls: str, fresh: bool = False) -> dict:
+        """uid -> GObject refnum for every block-diagram object of a VI Server class (also works on
+        broken VIs, unlike vi_dump)."""
+        cache = self.__dict__.setdefault("_uid_refs", {})
+        if fresh or cls not in cache:
+            h = self._vi(str(UIDS_VI))
+            h.SetControlValue("VI Refnum", vi)
+            h.SetControlValue("Class Name", cls)
+            h.SetControlValue("Traverse Target", 1)
+            h.Run(False)
+            cache[cls] = dict(zip(h.GetControlValue("UIDs") or (), h.GetControlValue("References") or ()))
+        return cache[cls]
+
+    def _remove(self, vi, items: list) -> None:
+        core = self._vi(str(Path(self.app.ApplicationDirectory) / _REMOVE_CORE))
+        core.SetControlValue("Items to Remove", items)
+        core.SetControlValue("Clean Wires (T)", True)
+        core.Run(False)
+        st, code, src = core.GetControlValue("error out")
+        if st:
+            raise LabVIEWError(f"removing failed (error {code}). {_strip_html(str(src))}")
+
+    def _gen_on_diagram(self, diagram_ref, xml: str, type_strings, data_strings, refs=()):
+        """Run a diagram script on one specific (sub)diagram, e.g. a case frame."""
+        h = self._vi(str(DIAG_GEN_VI))
+        h.SetControlValue("diagram", diagram_ref)
+        h.SetControlValue("XML Script Commands", xml)
+        h.SetControlValue("Type Strings", _byte_strings(type_strings))
+        h.SetControlValue("Data Strings", _byte_strings(data_strings))
+        h.SetControlValue("Obj Refs In[]", list(refs))
+        try:
+            h.Run(False)
+            return h.GetControlValue("error out")
+        finally:
+            if refs:
+                _try(lambda: h.SetControlValue("Obj Refs In[]", []))
+
+    def _diagram_uids(self, path: str, target) -> dict[str, int]:
+        """vi_dump container id ("" for the top level, "case_4#1" for a frame, "for_loop_3") -> the
+        UID of that LabVIEW Diagram object. Found by dropping a marker constant into every diagram,
+        reading back where vi_dump sees it, and reverting the VI."""
+        from . import gen
+        diags = self._uid_map(target, "Diagram", fresh=True)
+        ty = gen.parse_type("i32")
+        base = 1_900_000_000
+        try:
+            for uid, ref in diags.items():
+                xml = (f"<Script><Constant name=\"lvmcp_marker\" typeindex=\"0\" position=\"(0,0)\">"
+                       f"</Constant></Script>")
+                self._gen_on_diagram(ref, xml, [ty.td()], [ty.data(base + uid)])
+            g = self.vi_dump(path)
+            # The markers shift vi_dump's numbering, so key by the structure's UID, which is stable:
+            # "" (top level), "<uid>" (a loop body) or "<uid>#<frame>" (a case frame).
+            uid_of = {n["id"]: n.get("uid") for n in g["nodes"]}
+            found = {}
+            for n in g["nodes"]:
+                v = n.get("value")
+                if n["kind"] == "constant" and isinstance(v, int) and base <= v < base + 1_000_000:
+                    where = n.get("in", "")
+                    sid, _, frame = where.partition("#")
+                    key = "" if not where else f"{uid_of.get(sid)}" + (f"#{frame}" if frame else "")
+                    found[key] = v - base
+            return found
+        finally:
+            target._FlagAsMethod("Revert")
+            _try(lambda: target.Revert())
+            self._uid_refs = {}
+
+    def _delete(self, vi, items: list) -> None:
+        """GObject.Delete on each item (no rewiring)."""
+        if not items:
+            return
+        h = self._vi(str(DELETE_VI))
+        h.SetControlValue("References", items)
+        h.Run(False)
+
+    def _ref_for_uid(self, vi, uid: int, kind: str):
+        """GObject refnum for a vi_dump node. DFIR reports a constant by its data object's UID,
+        which is a few above the constant node's own UID."""
+        cls = "Constant" if kind == "constant" else "Node"
+        refs = self._uid_map(vi, cls)
+        if cls == "Constant":
+            below = [u for u in refs if u <= uid]
+            if below:
+                return refs[max(below)]
+        elif uid in refs:
+            return refs[uid]
+        raise LabVIEWError(f"object with uid {uid} not found on the diagram")
 
     def _dfir_text(self, path: str) -> str:
         if not DFIR_VI.exists():
@@ -561,6 +789,13 @@ BOOTSTRAP_VI = VIS_DIR / "lvmcp_gen_script.vi"
 BLANK_VI = VIS_DIR / "lvmcp_blank.vi"
 DFIR_VI = VIS_DIR / "lvmcp_dfir.vi"
 RAW_GEN_VI = VIS_DIR / "lvmcp_gen_script_raw.vi"
+UIDS_VI = VIS_DIR / "lvmcp_uids.vi"
+DELETE_VI = VIS_DIR / "lvmcp_delete.vi"
+DIAG_GEN_VI = VIS_DIR / "lvmcp_gen_script_diag.vi"
+_REMOVE_CORE = Path("vi.lib") / "Utility" / "QuickDropSupport" / "Remove and Rewire Objects_core.vi"
+# vi_dump node kinds that vi_edit can bind or remove -> gen kinds
+_EDIT_KINDS = {"function": "function", "subvi": "subvi", "constant": "constant",
+               "for_loop": "for", "while_loop": "while", "case": "case"}
 _VILIB_TREF = Path("vi.lib") / "Utility" / "traverseref.llb"
 _GEN_ERRORS = {
     1063: "a wire names a terminal that does not exist on that node. Call function_terminals(name) "
@@ -572,6 +807,23 @@ _GEN_ERRORS = {
 
 
 # ---- helpers --------------------------------------------------------------
+def _spec_names(d: dict) -> set[str]:
+    """Every node name declared in a block of spec contents, including nested structures."""
+    names: set[str] = set()
+    if not isinstance(d, dict):
+        return names
+    for key in ("constants", "functions", "subvis"):
+        names |= {x.get("name") for x in d.get(key, []) or [] if isinstance(x, dict)}
+    for st in d.get("structures", []) or []:
+        if isinstance(st, dict):
+            names.add(st.get("name"))
+            names |= set(st.get("shift_registers", []) or []) | set(st.get("output_tunnels", []) or [])
+            names |= _spec_names(st)
+            for fr in st.get("cases", []) or []:
+                names |= _spec_names(fr)
+    return names
+
+
 def _byte_strings(items: list[bytes]):
     """A LabVIEW string array whose elements carry raw bytes. Each element is sent as a COM byte
     array (VT_UI1) so it bypasses the code-page conversion applied to text."""
