@@ -69,12 +69,39 @@ CASES = {
             {"default": True, "constants": [{"name": "p3", "type": "dbl", "value": -1}]}]}],
         "wires": [["fruit", "C.selector"], ["p1", "t"], ["p2", "t"], ["p3", "t"], ["t", "price"]],
     }, {}, {"price": 2.25}),
+    # a subVI with a connector pane (error in/out on the bottom corners) ...
+    "sub_scale": ({
+        "controls": [{"name": "x", "type": "dbl"}, {"name": "gain", "type": "dbl", "default": 1},
+                     {"name": "ei", "type": "error", "label": "error in"}],
+        "indicators": [{"name": "y", "type": "dbl"}, {"name": "eo", "type": "error", "label": "error out"}],
+        "functions": [{"name": "m", "function": "Multiply"}],
+        "wires": [["x", "m.x"], ["gain", "m.y"], ["m.x*y", "y"], ["ei", "eo"]],
+    }, {"x": 4, "gain": 2.5}, {"y": 10.0}),
+    # ... called in a loop by another generated VI
+    "uses_sub": ({
+        "controls": [{"name": "xs", "type": "dbl[]", "default": [1, 2, 3]}],
+        "indicators": [{"name": "ys", "type": "dbl[]"}],
+        "constants": [{"name": "g", "type": "dbl", "value": 10}],
+        "structures": [{"name": "L", "type": "for_loop",
+                        "subvis": [{"name": "s", "path": "{D}/sub_scale.vi"}]}],
+        "wires": [["xs", "s.x"], ["g", "s.gain"], ["s.y", "ys"]],
+    }, {}, {"ys": [10.0, 20.0, 30.0]}),
 }
+
+
+def _fill(o):
+    if isinstance(o, dict):
+        return {k: _fill(v) for k, v in o.items()}
+    if isinstance(o, list):
+        return [_fill(v) for v in o]
+    return o.replace("{D}", D) if isinstance(o, str) else o
+
 
 names = sys.argv[1:] or list(CASES)
 failed = 0
 for name in names:
     spec, inputs, expect = CASES[name]
+    spec = _fill(spec)
     p = os.path.join(D, name + ".vi")
     try:
         lv.call(lv.vi_create, p, spec, True, "").result()

@@ -322,6 +322,7 @@ class LabVIEW:
             "path": str(p),
             "exec_state": EXEC_STATES.get(target.ExecState, target.ExecState),
             "front_panel": script.labels,
+            "connector_pane": script.connector,
             "script_xml": script.xml,
         }
 

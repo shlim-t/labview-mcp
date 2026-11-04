@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 import struct
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Any
 from xml.sax.saxutils import quoteattr
@@ -38,7 +39,7 @@ _ALIASES = {"double": "dbl", "float": "dbl", "float64": "dbl", "single": "sgl", 
             "uint8": "u8", "uint16": "u16", "uint32": "u32", "uint64": "u64",
             "boolean": "bool", "str": "string"}
 
-TYPE_HELP = ("Types: dbl, sgl, i8, i16, i32, i64, u8, u16, u32, u64, bool, string, path; "
+TYPE_HELP = ("Types: dbl, sgl, i8, i16, i32, i64, u8, u16, u32, u64, bool, string, path, error; "
              "arrays by suffix (\"dbl[]\", \"string[][]\"); clusters as "
              "{\"cluster\": [{\"name\": \"a\", \"type\": \"dbl\"}, ...]}.")
 
@@ -168,6 +169,11 @@ def parse_type(t: Any) -> LVType:
     while s.endswith("[]"):
         s, dims = s[:-2], dims + 1
     s = _ALIASES.get(s, s)
+    if s in ("error", "errorcluster"):
+        # Same layout and names as LabVIEW's error cluster, so it wires to error in/out terminals.
+        base = LVType("cluster", fields=[("status", LVType("bool")), ("code", LVType("i32")),
+                                         ("source", LVType("string"))])
+        return LVType("array", elem=base, dims=dims) if dims else base
     if s not in _NUM and s not in ("bool", "string", "path"):
         raise SpecError(f"unknown type {t!r}. {TYPE_HELP}")
     base = LVType(s)
@@ -209,6 +215,7 @@ class Script:
     data_strings: list[bytes]
     labels: dict[str, str]  # node name -> front-panel label for controls/indicators
     defaults: dict[str, Any]  # front-panel label -> default value (set after generation)
+    connector: dict[str, str]  # front-panel label -> connector pane slot
 
 
 @dataclass
@@ -252,8 +259,18 @@ class _Builder:
                 raise SpecError(f"function {f.get('name')!r} needs 'function': the palette name, e.g. \"Add\"")
         for s in d.get("subvis", []) or []:
             self.add(s.get("name"), "subvi", container, s)
-            if not isinstance(s.get("path"), str) or not s["path"].lower().endswith((".vi", ".vim")):
+            path = s.get("path")
+            if not isinstance(path, str) or not path.lower().endswith((".vi", ".vim")):
                 raise SpecError(f"subvi {s.get('name')!r} needs an absolute 'path' to a .vi")
+            pp = Path(path)
+            if not pp.is_absolute():
+                raise SpecError(f"subvi {s.get('name')!r}: path must be absolute: {path}")
+            # Inside an .llb the file itself is the library; otherwise the VI file must exist,
+            # or LabVIEW opens a modal "Find the VI" dialog and blocks.
+            llb = next((q for q in pp.parents if q.suffix.lower() == ".llb"), None)
+            if not (pp.is_file() or (llb is not None and llb.is_file())):
+                raise SpecError(f"subvi {s.get('name')!r}: file not found: {path}")
+            s["_path"] = str(pp)
         for st in d.get("structures", []) or []:
             self.collect_structure(st, container)
 
@@ -425,7 +442,7 @@ class _Builder:
                 out.append(f"<Function name={quoteattr(name)} style={quoteattr(n.spec['function'].strip())} "
                            f"position=\"{p}\"></Function>")
             elif n.kind == "subvi":
-                out.append(f"<SubVI name={quoteattr(name)} path={quoteattr(n.spec['path'])} "
+                out.append(f"<SubVI name={quoteattr(name)} path={quoteattr(n.spec['_path'])} ignoreSearchDialog=\"TRUE\" "
                            f"position=\"{p}\"></SubVI>")
             elif n.kind in ("for", "while", "case"):
                 w, h = self.size(name, wires)
@@ -461,6 +478,52 @@ class _Builder:
                     out.append("</Structure>")
 
 
+# Connector pane: the helper's blank VI uses the 4x2x2x4 pattern. conpaneidx numbers its terminals
+# counter-clockwise from the bottom right (measured):
+#          top0=7  top1=5
+#   left0=11                right0=3
+#   left1=10                right1=2
+#   left2=9                 right2=1
+#   left3=8                 right3=0
+#          bottom0=6 bottom1=4
+CONPANE_SLOTS = {"left0": 11, "left1": 10, "left2": 9, "left3": 8, "top0": 7, "top1": 5,
+                 "bottom0": 6, "bottom1": 4, "right0": 3, "right1": 2, "right2": 1, "right3": 0}
+_AUTO_ORDER = {False: ["left0", "left1", "left2", "top0", "top1", "left3"],
+               True: ["right0", "right1", "right2", "bottom0", "bottom1", "right3"]}
+
+
+def _assign_connector(controls: list[dict]) -> dict[str, str]:
+    """Front-panel name -> slot. Controls fill the left side then the top, indicators the right side
+    then the bottom, in spec order; "connector": "left3" pins a slot, false leaves it unwired."""
+    taken: dict[str, str] = {}
+    for c in controls:
+        slot = c.get("connector", "auto")
+        if slot in (False, None, "none"):
+            continue
+        if slot != "auto":
+            if slot not in CONPANE_SLOTS:
+                raise SpecError(f"{c['name']!r}: connector must be one of {sorted(CONPANE_SLOTS)}, "
+                                "\"auto\" or false")
+            if slot in taken.values():
+                raise SpecError(f"{c['name']!r}: connector slot {slot!r} is used twice")
+            taken[c["name"]] = slot
+    for c in controls:  # error clusters go to the bottom corners, as in NI's VIs
+        if c.get("connector", "auto") == "auto" and str(c.get("type", "")).lower() in ("error", "errorcluster"):
+            slot = "right3" if c["_ind"] else "left3"
+            if slot not in taken.values():
+                taken[c["name"]] = slot
+    for c in controls:
+        if c.get("connector", "auto") != "auto" or c["name"] in taken:
+            continue
+        free = [s for s in _AUTO_ORDER[c["_ind"]] if s not in taken.values()]
+        if not free:
+            free = [s for s in CONPANE_SLOTS if s not in taken.values()]
+        if not free:
+            raise SpecError("more than 12 controls and indicators; set \"connector\": false on some")
+        taken[c["name"]] = free[0]
+    return taken
+
+
 def build(spec: dict) -> Script:
     if not isinstance(spec, dict):
         raise SpecError("spec must be an object")
@@ -494,6 +557,7 @@ def build(spec: dict) -> Script:
     pos: dict[str, tuple[int, int]] = {}
     b.place("", (30, 30), wires, pos)
 
+    conpane = _assign_connector(controls)
     out = ["<Script>"]
     fp_rows = {False: 0, True: 0}
     for c in controls:
@@ -504,7 +568,9 @@ def build(spec: dict) -> Script:
         fp = (300 if c["_ind"] else 20, 20 + r * 60)
         out.append(f"<Control name={quoteattr(n)} typeindex=\"{ti}\""
                    + (" indicator=\"TRUE\"" if c["_ind"] else "")
-                   + f" label={quoteattr(labels[n])} position=\"{_pos(*fp)}\"></Control>")
+                   + f" label={quoteattr(labels[n])}"
+                   + (f" conpaneidx=\"{CONPANE_SLOTS[conpane[n]]}\"" if n in conpane else "")
+                   + f" position=\"{_pos(*fp)}\"></Control>")
         out.append(f"<ControlTerminal controlname={quoteattr(n)} position=\"{_pos(*pos[n])}\"></ControlTerminal>")
     b.emit("", pos, wires, out)
     # LabVIEW's scripting resolves a wire from its sink: source = where data goes, destination = driver.
@@ -517,4 +583,5 @@ def build(spec: dict) -> Script:
         data_strings=[d for _, d in b.types],
         labels=labels,
         defaults=defaults,
+        connector={labels[n]: slot for n, slot in conpane.items()},
     )

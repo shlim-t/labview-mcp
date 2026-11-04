@@ -181,12 +181,18 @@ async def vi_create(
                        "functions": [{"name": "a", "function": "Add"}]}],
        "wires": [["n", "L.N"], ["zero", "acc.left"], ["acc.left", "a.x"], ["L.i", "a.y"],
                  ["a.x+y", "acc.right"], ["acc.right", "total"]]}
+    Connector pane: every control and indicator is wired to the 4x2x2x4 connector pane so the VI
+    works as a subVI right away (controls on the left then top, indicators on the right then
+    bottom, in spec order). Pin a slot with "connector": "left3" (left0-3, top0-1, bottom0-1,
+    right0-3) or leave one off with "connector": false. LabVIEW convention: error in at left3,
+    error out at right3; type "error" is an error cluster.
     The diagram is tidied with LabVIEW's Clean Up Diagram."""
     res = await _run(lv.vi_create, path, spec, overwrite, description)
     text, imgs = await _run(lv.vi_snapshot, res["path"], False, True, False, False)
     out: list[Any] = [
         f"Created {res['path']} (state: {res['exec_state']}).\n"
         f"Front panel: {res['front_panel']}\n"
+        f"Connector pane (callers wire these labels): {res['connector_pane']}\n"
         "Check the diagram picture: a wire that LabVIEW could not connect is simply missing. "
         "Then call vi_run to test."
     ]

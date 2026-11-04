@@ -63,7 +63,9 @@ Loops and case structures go in `"structures"` and can hold their own constants,
 
 Wire straight across structure borders and LabVIEW adds the tunnels. For Loops build arrays from values that leave them, and While Loops pass out the last value. Each frame of a case wires its result to an output tunnel.
 
-Types: `dbl sgl i8 i16 i32 i64 u8 u16 u32 u64 bool string path`, arrays (`"dbl[]"`, `"i32[][]"`), and clusters (`{"cluster": [{"name": "gain", "type": "dbl"}, ...]}`). Function terminals use the names shown in LabVIEW's Context Help. SubVI terminals use the subVI's control labels.
+**Connector pane:** every control and indicator is wired to the standard 4x2x2x4 connector pane, so a generated VI works as a subVI right away. Inputs go on the left, outputs on the right, and `error` clusters on the bottom corners, as in NI's own VIs. To pin a slot, use `"connector": "left3"`; to leave a terminal unwired, use `"connector": false`. The tool reports the resulting layout.
+
+Types: `dbl sgl i8 i16 i32 i64 u8 u16 u32 u64 bool string path error`, arrays (`"dbl[]"`, `"i32[][]"`), and clusters (`{"cluster": [{"name": "gain", "type": "dbl"}, ...]}`). Function terminals use the names shown in LabVIEW's Context Help. SubVI terminals use the subVI's control labels.
 
 ## Requirements
 
@@ -108,7 +110,8 @@ agent ──MCP/stdio──▶ labview-mcp ──ActiveX (COM)──▶ LabVIEW.
 - [ ] LabVIEWCLI tools: build specs, mass compile, VI Analyzer, unit tests.
 - [x] `vi_create`: new VIs with controls, constants, functions, subVIs, and wires.
 - [x] `vi_create`: For/While loops, shift registers, case structures (boolean, integer, string), nesting.
-- [ ] `vi_create`: visible labels, constant widths, connector pane, event structures, enums.
+- [x] `vi_create`: connector pane and error clusters, so generated VIs can call each other.
+- [ ] `vi_create`: visible labels, constant widths, event structures, enums.
 - [ ] Helper VIs saved for older LabVIEW versions.
 - [ ] Scripted edits: duplicate a case, set constants, rename, create globals. Each edit makes a backup first.
 
