@@ -129,6 +129,18 @@ class LabVIEW:
             vi._FlagAsMethod(m)
         return vi
 
+    def _helper(self, path: Path):
+        """A bundled helper VI, checked to be runnable. The helpers are saved for LabVIEW 2015 and use
+        private scripting methods; an older or different LabVIEW may lack one, which breaks the VI."""
+        if not Path(path).exists():
+            raise LabVIEWError(f"helper VI missing from the package: {path}")
+        vi = self._vi(str(path))
+        if vi.ExecState == 0:
+            raise LabVIEWError(
+                f"the helper {Path(path).name} cannot run in LabVIEW {self.app.Version}: it uses a "
+                "scripting method this LabVIEW does not have. This tool is not available here.")
+        return vi
+
     def _scratch(self, name: str) -> Path:
         d = self._tmp / f"{name}-{time.time_ns()}"
         d.mkdir(parents=True)
@@ -330,7 +342,7 @@ class LabVIEW:
     def _gen_script(self, target, xml: str, type_strings: list[bytes], data_strings: list[bytes],
                     refs=(), raw: bool = False):
         """raw=True uses the helper without Clean Up Diagram (edits keep the user's layout)."""
-        boot = self._vi(str(RAW_GEN_VI if raw else BOOTSTRAP_VI))
+        boot = self._helper(RAW_GEN_VI if raw else BOOTSTRAP_VI)
         boot.SetControlValue("reference", target)
         boot.SetControlValue("XML Script Commands", xml)
         boot.SetControlValue("Type Strings", _byte_strings(type_strings))
@@ -667,7 +679,7 @@ class LabVIEW:
         broken VIs, unlike vi_dump)."""
         cache = self.__dict__.setdefault("_uid_refs", {})
         if fresh or cls not in cache:
-            h = self._vi(str(UIDS_VI))
+            h = self._helper(UIDS_VI)
             h.SetControlValue("VI Refnum", vi)
             h.SetControlValue("Class Name", cls)
             h.SetControlValue("Traverse Target", 1)
@@ -691,7 +703,7 @@ class LabVIEW:
 
     def _gen_on_diagram(self, diagram_ref, xml: str, type_strings, data_strings, refs=()):
         """Run a diagram script on one specific (sub)diagram, e.g. a case frame."""
-        h = self._vi(str(DIAG_GEN_VI))
+        h = self._helper(DIAG_GEN_VI)
         h.SetControlValue("diagram", diagram_ref)
         h.SetControlValue("XML Script Commands", xml)
         h.SetControlValue("Type Strings", _byte_strings(type_strings))
@@ -745,7 +757,7 @@ class LabVIEW:
         """GObject.Delete on each item (no rewiring)."""
         if not items:
             return
-        h = self._vi(str(DELETE_VI))
+        h = self._helper(DELETE_VI)
         h.SetControlValue("References", items)
         h.Run(False)
 
@@ -766,7 +778,7 @@ class LabVIEW:
         if not DFIR_VI.exists():
             raise LabVIEWError(f"helper VI missing from the package: {DFIR_VI}")
         target = self._vi(path)
-        h = self._vi(str(DFIR_VI))
+        h = self._helper(DFIR_VI)
         h.SetControlValue("reference", target)
         h.SetControlValue("VI Variable Name", "vi")
         h.SetControlValue("Indentation Level", 0)
@@ -830,7 +842,7 @@ class LabVIEW:
         """The DFIR export leaves array constants empty; read constant values with VI Scripting.
         DFIR reports a constant by its data object's UID, a few above the constant's own UID."""
         target = self._vi(path)  # keep the reference alive while the helper runs
-        h = self._vi(str(UIDS_VI))
+        h = self._helper(UIDS_VI)
         h.SetControlValue("VI Refnum", target)
         h.SetControlValue("Class Name", "Constant")
         h.SetControlValue("Traverse Target", 1)
@@ -852,7 +864,7 @@ class LabVIEW:
         target._FlagAsMethod("GetLockState")
         if _try(lambda: target.GetLockState()) == 3:
             raise LabVIEWError(f"{Path(path).name} is password-protected; its block diagram cannot be read.")
-        h = self._vi(str(UIDS_VI))
+        h = self._helper(UIDS_VI)
         h.SetControlValue("VI Refnum", target)
         h.SetControlValue("Class Name", "GObject")
         h.SetControlValue("Traverse Target", 1)
@@ -883,7 +895,8 @@ class LabVIEW:
         return scan.build(rows, labels)
 
 
-VIS_DIR = Path(__file__).parent / "vis"
+# Helper VIs; LVMCP_VIS_DIR points at another copy (used to test copies saved for older LabVIEW).
+VIS_DIR = Path(os.environ.get("LVMCP_VIS_DIR") or Path(__file__).parent / "vis")
 BOOTSTRAP_VI = VIS_DIR / "lvmcp_gen_script.vi"
 BLANK_VI = VIS_DIR / "lvmcp_blank.vi"
 DFIR_VI = VIS_DIR / "lvmcp_dfir.vi"

@@ -4,7 +4,7 @@ An [MCP](https://modelcontextprotocol.io) server that lets AI coding agents — 
 
 LabVIEW source code is a binary, graphical format. Text-based coding agents can't open a `.vi` file. labview-mcp acts as the agent's eyes and hands: it drives your installed LabVIEW over its ActiveX server and returns what the agent needs as text, images, and values.
 
-> Status: **v0.6.1.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth. Any existing VI can be read as a graph (`vi_dump`) and changed in place (`vi_edit`: remove, replace, and add code, including inside existing loops and case frames).
+> Status: **v0.7.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth. Any existing VI can be read as a graph (`vi_dump`) and changed in place (`vi_edit`: remove, replace, and add code, including inside existing loops and case frames).
 
 ## What the agent can do
 
@@ -117,10 +117,12 @@ Types: `dbl sgl i8 i16 i32 i64 u8 u16 u32 u64 bool string path error`, arrays (`
 
 ## Requirements
 
-- Windows with LabVIEW installed. Tested with **LabVIEW 2026 Q3 (64-bit)**. Community Edition works for personal and non-commercial use.
+- Windows with LabVIEW installed. Community Edition works for personal and non-commercial use.
 - In LabVIEW, open **Tools ▸ Options ▸ VI Server** and enable **ActiveX**.
 - Python ≥ 3.10.
-- `vi_create`, `vi_dump`, and `vi_edit` use helper VIs saved in **LabVIEW 2026**. Older versions are on the roadmap.
+- `vi_create`, `vi_dump`, and `vi_edit` use small helper VIs shipped in the package and saved in **LabVIEW 2015** format, so they open in LabVIEW 2015 and later. They call scripting methods that an older LabVIEW might lack. In that case the tool reports which helper cannot run, and `vi_dump` falls back to its scan reader where it can.
+
+Tested on **LabVIEW 2026 Q3 (64-bit, English)** under Korean Windows. Reports from other versions and languages are welcome.
 
 ## Install
 
@@ -167,7 +169,13 @@ agent ──MCP/stdio──▶ labview-mcp ──ActiveX (COM)──▶ LabVIEW.
 - [x] `vi_create`: For/While loops, shift registers, case structures (boolean, integer, string), nesting.
 - [x] `vi_create`: connector pane and error clusters, so generated VIs can call each other.
 - [ ] `vi_create`: visible labels, constant widths, event structures, enums.
-- [ ] Helper VIs saved for older LabVIEW versions.
+- [x] Helper VIs saved for LabVIEW 2015 and later.
+- [ ] Verified on LabVIEW versions older than 2026 and on localized (non-English) LabVIEW.
+
+## Development
+
+- The helper VIs are edited in LabVIEW from `vis_src/`. `python tools/build_helpers.py` saves them for LabVIEW 2015 into `src/labview_mcp/vis/`, which is what ships.
+- `tests/live_vi_create.py`, `tests/live_vi_edit.py`, and `tests/smoke_mcp.py` need Windows and LabVIEW. They build real VIs, run them, and check the results.
 
 ## License
 
