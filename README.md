@@ -4,7 +4,7 @@ An [MCP](https://modelcontextprotocol.io) server that lets AI coding agents — 
 
 LabVIEW source code is a binary, graphical format. Text-based coding agents can't open a `.vi` file. labview-mcp acts as the agent's eyes and hands: it drives your installed LabVIEW over its ActiveX server and returns what the agent needs as text, images, and values.
 
-> Status: **v0.13.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth, and **user interfaces**: front-panel styles (buttons, LEDs, knobs, gauges, charts), event structures, and Property and Invoke Nodes. Any existing VI can be read as a graph (`vi_dump`) and changed in place (`vi_edit`: remove, replace, and add code, including inside existing loops and case frames).
+> Status: **v0.14.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth, and **user interfaces**: front-panel styles (buttons, LEDs, knobs, gauges, charts), event structures, and Property and Invoke Nodes. Any existing VI can be read as a graph (`vi_dump`) and changed in place (`vi_edit`: remove, replace, and add code, including inside existing loops and case frames). **Projects and builds**: the agent can put VIs in a project, add application (EXE), packed-library, and source-distribution build specs, build them, and mass compile folders.
 
 ## What the agent can do
 
@@ -22,6 +22,10 @@ LabVIEW source code is a binary, graphical format. Text-based coding agents can'
 | `lv_class_properties` | The properties of a VI Server class, such as Boolean, WaveformChart, or VI, **as LabVIEW itself lists them**. You can filter them by a word. Use the names in Property Nodes. |
 | `function_terminals` | Exact terminal names of a function, **verified against LabVIEW's scripting engine** so the agent wires them right the first time. |
 | `vi_create` | **Builds a new VI** from a JSON spec: typed controls and indicators with defaults and front-panel styles, constants, palette functions, subVI calls, For/While loops, shift registers, case structures, event structures, and wires. LabVIEW's Clean Up Diagram tidies the result, and the tool returns pictures of it. |
+| `project_create` / `project_add` | **Creates or extends a LabVIEW project** (`.lvproj`): adds files, and adds build specs for an application (EXE), a packed library (`.lvlibp`), or a source distribution. LabVIEW creates the project and its items itself. |
+| `project_info` | A project's targets, items, and build specs (startup VIs, output folder, version), read from the file. |
+| `project_build` | **Builds a build spec with NI's Application Builder** and returns the generated files. A broken VI fails the build with LabVIEW's list of broken VIs and their reasons. |
+| `lv_mass_compile` | Mass compiles a folder and lists the VIs that were broken or failed to load. |
 
 Example prompts:
 
@@ -31,6 +35,7 @@ Example prompts:
 - "Make a VI that takes an array of readings and returns their sum and mean, then test it."
 - "In `Scale.vi`, also output `Gain` squared, then run it."
 - "Make a panel with a knob, a gauge, a Double button and a STOP button."
+- "Put `Main.vi` in a project, build it as `Logger.exe`, and check the EXE runs."
 
 ### `vi_dump` output (excerpt)
 
@@ -202,6 +207,24 @@ Strings are stored in the Windows ANSI code page, as LabVIEW does, so characters
 
 Types: `dbl sgl i8 i16 i32 i64 u8 u16 u32 u64 bool string path error`, enums (`{"enum": [...]}`), arrays (`"dbl[]"`, `"i32[][]"`), and clusters (`{"cluster": [{"name": "gain", "type": "dbl"}, ...]}`). Function terminals use the names shown in LabVIEW's Context Help. SubVI terminals use the subVI's control labels.
 
+### Projects and builds
+
+```json
+{"path": "C:/work/Demo/Demo.lvproj",
+ "files": ["C:/work/Demo/Main.vi"],
+ "build_specs": [
+   {"name": "Demo App", "type": "exe", "startup": ["C:/work/Demo/Main.vi"],
+    "include": ["C:/work/Demo/Plugin.vi"], "file_name": "Demo.exe", "version": "1.2.0.0"},
+   {"name": "Lib", "type": "ppl", "library": "C:/work/Demo/Tools.lvlib"},
+   {"name": "Src", "type": "source", "include": ["C:/work/Demo/Main.vi"]}
+ ]}
+```
+
+`project_create` takes this. `project_build` with `build_spec="Demo App"` then produces `builds/Demo App/Demo.exe` next to the project. LabVIEW creates the project, its items, and the empty build specs through its ActiveX Project interface. The build settings are the properties that LabVIEW itself writes for each spec type, filled into the saved project file. `project_build` calls NI's Application Builder API (`AB_API_Simple/Build (path).vi`), the same VI that LabVIEWCLI's ExecuteBuildSpec operation uses.
+
+- Application Builder is included in LabVIEW Community Edition and in the Professional edition. A built EXE needs the matching LabVIEW Run-Time Engine on the machine that runs it.
+- `lv_mass_compile` saves the VIs it compiles. It refuses folders inside the LabVIEW installation. Don't mass compile a copy of a library while LabVIEW holds the original: the two get cross-linked, and LabVIEW re-saves the original.
+
 ## Requirements
 
 - Windows with LabVIEW installed. Community Edition works for personal and non-commercial use.
@@ -229,6 +252,7 @@ agent ──MCP/stdio──▶ labview-mcp ──ActiveX (COM)──▶ LabVIEW.
                                                    ├─ CalleesPaths     → vi_hierarchy
                                                    ├─ Set/Run/GetValue → vi_run
                                                    ├─ helper VIs       → vi_create, vi_edit
+                                                   ├─ Project + AB API → project_*, lv_mass_compile
                                                    └─ helper VI        → vi_dump
 ```
 
@@ -251,7 +275,8 @@ agent ──MCP/stdio──▶ labview-mcp ──ActiveX (COM)──▶ LabVIEW.
 - [ ] `vi_edit`: rename, move, and retype existing objects; add frames to cases.
 - [x] `vi_dump` for any VI (scan fallback), including broken ones and VIs with property nodes and event structures.
 - [ ] `vi_diff`: a semantic diff between two versions of a VI, for code review on binary files.
-- [ ] LabVIEWCLI tools: build specs, mass compile, VI Analyzer, unit tests.
+- [x] Projects: create, add files and build specs (EXE, packed library, source distribution), build, mass compile.
+- [ ] Installers, shared libraries (DLL), VI Analyzer, unit tests; creating libraries and classes.
 - [x] `vi_create`: new VIs with controls, constants, functions, subVIs, and wires.
 - [x] `vi_create`: For/While loops, shift registers, case structures (boolean, integer, string), nesting.
 - [x] `vi_create`: connector pane and error clusters, so generated VIs can call each other.
@@ -271,7 +296,7 @@ agent ──MCP/stdio──▶ labview-mcp ──ActiveX (COM)──▶ LabVIEW.
 - **Generated helpers** are built by `python tools/helpergen.py` from Python specs into `vis_src/`. Start from a freshly started LabVIEW so that no VI with the same name is already in memory. The generator uses diagram scripting together with the two hand-built configuration helpers: `lvmcp_propconfig` and `lvmcp_invokeconfig`.
 - **Shipping:** `python tools/build_helpers.py` saves every helper for LabVIEW 2015 into `src/labview_mcp/vis/`, which is what ships.
 - **Class table:** `src/labview_mcp/vi_classes.json` maps VI Server class names to the class numbers used in refnum type descriptors. It was measured by wiring a refnum of each class number into a Property Node and reading the node's class.
-- `tests/live_vi_create.py`, `tests/live_vi_edit.py`, and `tests/smoke_mcp.py` need Windows and LabVIEW. They build real VIs, run them, and check the results.
+- `tests/live_vi_create.py`, `tests/live_vi_edit.py`, `tests/live_project.py`, and `tests/smoke_mcp.py` need Windows and LabVIEW. They build real VIs, run them, and check the results.
 
 ## License
 

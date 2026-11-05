@@ -11,7 +11,8 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 EXPECTED = {"lv_status", "vi_info", "vi_text", "vi_snapshot", "vi_hierarchy", "vi_run", "vi_dump", "vi_edit",
-            "vi_create", "lv_functions", "function_terminals", "lv_class_properties"}
+            "vi_create", "lv_functions", "function_terminals", "lv_class_properties",
+            "project_info", "project_create", "project_add", "project_build", "lv_mass_compile"}
 
 
 async def main() -> int:
@@ -29,6 +30,13 @@ async def main() -> int:
             print("lv_class_properties:", "error" if r.is_error else " ".join(r.content[0].text[:120].split()))
             if r.is_error:
                 return 1
+            ex = (r"C:\Program Files\National Instruments\LabVIEW 2026\vi.lib\AppBuilder\AB_API"
+                  r"\examples\example_project\API - Example Project.lvproj")
+            if os.path.exists(ex):
+                r = await s.call_tool("project_info", {"path": ex})
+                print("project_info:", "error" if r.is_error else " ".join(r.content[0].text[:160].split()))
+                if r.is_error:
+                    return 1
             r = await s.call_tool("function_terminals", {"name": "Add"})
             print("function_terminals:", r.content[0].text[:120])
             path = os.path.join(tempfile.mkdtemp(prefix="lvmcp-smoke-"), "smoke.vi")

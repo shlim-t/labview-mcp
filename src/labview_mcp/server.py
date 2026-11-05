@@ -11,8 +11,10 @@ from mcp.server.mcpserver.utilities.types import Image
 
 from . import __version__
 from .lv import LabVIEW
+from .project import Projects
 
 lv = LabVIEW()
+projects = Projects(lv)
 
 mcp = MCPServer(
     "labview-mcp",
@@ -28,6 +30,8 @@ mcp = MCPServer(
         "terminal names); check the returned diagram picture, then test with vi_run.\n"
         "To read a diagram as data: vi_dump (nodes, wires, constant values). To change an existing "
         "VI: vi_edit adds code wired to its existing controls/indicators, with a backup.\n"
+        "To ship: project_create / project_add put VIs in a .lvproj with an application (EXE) "
+        "build spec, project_build builds it, lv_mass_compile recompiles a folder.\n"
         "All paths must be absolute. vi_run executes code on the user's machine and may drive "
         "real instruments; only run VIs the user asked you to run."
     ),
@@ -347,6 +351,61 @@ async def function_terminals(name: str, size: int | None = None) -> dict:
     as "<node>.<terminal>". "help_labels" lists the Context Help text; inputs usually carry a
     default in parentheses there. Growable nodes are wired as element[1..N] instead."""
     return await _run(lv.function_terminals, name)
+
+
+@mcp.tool()
+async def project_info(path: str) -> dict:
+    """Contents of a LabVIEW project (.lvproj): targets, items (with project path like
+    "/My Computer/Main.vi" and file path) and build specifications (type, startup and always-included
+    VIs, output folder and primary output, version). Reads the file; nothing is opened or changed."""
+    return await _run(projects.info, path)
+
+
+@mcp.tool()
+async def project_create(path: str, files: list[str] | None = None,
+                         build_specs: list[dict] | None = None, overwrite: bool = False) -> dict:
+    """Create a LabVIEW project (.lvproj) under My Computer holding `files` (absolute paths of VIs,
+    controls, libraries, other files), optionally with build specs. LabVIEW makes the project and
+    adds the items itself.
+
+    A build spec: {"name": "My App", "type": "exe" | "ppl" | "source", "version": "1.0.0.0",
+    "description": "...", "output_dir": "C:/.../builds/My App" (default <project folder>/builds/
+    <name>), "file_name": "MyApp.exe" (exe/ppl; default <name>.exe / <name>.lvlibp), plus
+      exe (application): "startup": ["C:/.../Main.vi"] (opens when the EXE runs), "include":
+        [always-included VIs, e.g. ones called dynamically];
+      ppl (packed library): "library": "C:/.../My.lvlib", "include": [...];
+      source (source distribution, copies the VIs and their non-vi.lib subVIs): "include": [...]}.
+    Source files are added to the project if missing. Build it with project_build. Returns
+    project_info of the result."""
+    return await _run(projects.create, path, files or [], build_specs or [], overwrite)
+
+
+@mcp.tool()
+async def project_add(path: str, files: list[str] | None = None,
+                      build_specs: list[dict] | None = None) -> dict:
+    """Add files and/or new build specs (same format as project_create) to an existing project.
+    Files already in the project are skipped; a build spec name already in use is refused. LabVIEW
+    opens, saves and closes the project, so close it in the LabVIEW IDE first if it has unsaved
+    changes there."""
+    return await _run(projects.add, path, files or [], build_specs or [])
+
+
+@mcp.tool()
+async def project_build(path: str, build_spec: str = "", target: str = "My Computer") -> dict:
+    """Build a project's build specification with NI's Application Builder (empty build_spec =
+    build all of the target's specs). Returns the generated files (the .exe first for an
+    application). A broken VI fails the build with LabVIEW's list of broken VIs and reasons; fix
+    them (vi_snapshot / vi_edit) and build again. The built EXE needs the LabVIEW Run-Time Engine
+    of this LabVIEW version on the machine that runs it."""
+    return await _run(projects.build, path, build_spec, target)
+
+
+@mcp.tool()
+async def lv_mass_compile(directory: str) -> dict:
+    """Mass compile every VI under a folder in this LabVIEW version (recompiles and saves them; use
+    after upgrading LabVIEW or moving code). "problems" lists the log lines about VIs that failed
+    to load, were broken or could not be saved; an empty list means all compiled cleanly."""
+    return await _run(projects.mass_compile, directory)
 
 
 def main() -> None:
