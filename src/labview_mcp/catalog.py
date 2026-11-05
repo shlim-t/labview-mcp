@@ -61,7 +61,7 @@ def search(app_dir: str, query: str, limit: int = 40) -> list[str]:
     return hits[:limit]
 
 
-_SKIP = re.compile(r"^(\.\.\.|element|empty \d+)$")
+_SKIP = re.compile(r"^(\.\.\.|empty \d+)$")
 _SERIES = re.compile(r"^(.*?) (n-1|n|\d+)(\s*\([^()]*\))?$")
 
 
@@ -72,11 +72,13 @@ def is_growable(labels: list[str]) -> bool:
 def candidates(labels: list[str], size: int | None = None) -> list[str]:
     """Names worth probing for each help label: as written, without a trailing "(default)", and
     capitalised. Numbered series ("string 0", "input n (0)") are expanded up to `size`.
-    A bare "element" is never probed: on a growable node it has crashed LabVIEW."""
+    A bare "element" is not probed on a growable node, where it has crashed LabVIEW (queue
+    functions have a plain "element" terminal)."""
     out: list[str] = []
+    grows = bool(size) or is_growable(labels)
 
     def add(c):
-        if c and ":" not in c and c not in out and not _SKIP.match(c):
+        if c and ":" not in c and c not in out and not _SKIP.match(c) and not (grows and c == "element"):
             out.append(c)
 
     for lab in labels:

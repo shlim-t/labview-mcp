@@ -194,6 +194,10 @@ async def vi_create(
     A case wired to an error cluster has frames "No Error" and "Error".
     To pass a value through a case frame unchanged, give that frame "pass": [["acc.left", "t"]]
     (source, output tunnel); a wire from outside straight to an output tunnel does not work.
+    Queues (producer/consumer, queued message handler): "Obtain Queue" (wire a constant of the
+    element type to "element data type"; "queue out"), "Enqueue Element" ("queue", "element"),
+    "Dequeue Element" ("queue", "element" out, "queue out"), "Release Queue" ("queue"). Loops in
+    parallel share the queue wire; release it from the consumer's "queue out".
     State machine: a while loop with shift registers ["state", ...], the enum state wired to
     state.left -> C.selector, one case frame per state, each frame wiring the next state to an
     output tunnel -> state.right, and a boolean tunnel -> W.stop.

@@ -202,6 +202,27 @@ CASES = {
                   ["nx", "state.right"], ["ao", "acc.right"], ["st", "W.stop"],
                   ["acc.right", "total"], ["state.right", "last"]],
     }, {}, {"total": 3, "last state": "Done"}),
+    # producer/consumer: a For Loop enqueues 0..n-1, a While Loop in parallel dequeues n elements
+    # and sums them, then the queue is released
+    "producer_consumer": ({
+        "controls": [{"name": "n", "type": "i32", "default": 5}],
+        "indicators": [{"name": "sum", "type": "dbl"}],
+        "constants": [{"name": "etype", "type": "dbl", "value": 0}, {"name": "zero", "type": "dbl", "value": 0}],
+        "functions": [{"name": "obtain", "function": "Obtain Queue"},
+                      {"name": "release", "function": "Release Queue"}],
+        "structures": [
+            {"name": "P", "type": "for_loop", "functions": [{"name": "enq", "function": "Enqueue Element"}]},
+            {"name": "C", "type": "while_loop", "shift_registers": ["acc"],
+             "functions": [{"name": "deq", "function": "Dequeue Element"}, {"name": "add", "function": "Add"},
+                           {"name": "inc", "function": "Increment"},
+                           {"name": "ge", "function": "Greater Or Equal?"}]}],
+        "wires": [["etype", "obtain.element data type"],
+                  ["obtain.queue out", "enq.queue"], ["n", "P.N"], ["P.i", "enq.element"],
+                  ["obtain.queue out", "deq.queue"], ["zero", "acc.left"], ["deq.element", "add.x"],
+                  ["acc.left", "add.y"], ["add.x+y", "acc.right"], ["acc.right", "sum"],
+                  ["C.i", "inc.x"], ["inc.x+1", "ge.x"], ["n", "ge.y"], ["ge.x >= y?", "C.stop"],
+                  ["deq.queue out", "release.queue"]],
+    }, {}, {"sum": 10.0}),
     # an unlinked Property Node of class Application needs no reference
     "app_version": ({
         "indicators": [{"name": "ver", "type": "string", "label": "version"}],
@@ -227,8 +248,37 @@ UI_CASES = {
         "wires": [["stop", "W.stop"], ["x", "m.x"], ["k", "m.y"], ["m.x*y", "y"],
                   ["W.i", "inc.x"], ["inc.x+1", "hits"], ["t", "pv.Visible"]],
     }, {  # where each front-panel terminal must end up: "" = top level, k = event frame k
-        "STOP": 0, "Double it": None, "x": 1, "y": 1, "hits": 2},
+        "STOP": 0, "Double it": 1, "x": 1, "y": 1, "hits": 2},
         ['[0] "STOP": Value Change', '[1] "Double it": Value Change', '[2] "y": Mouse Down']),
+    # Queued Message Handler: the UI loop's events enqueue enum messages; a second loop dequeues
+    # them and handles each in a case; "Exit" stops it, then the queue is released
+    "qmh": ({
+        "controls": [{"name": "stop", "type": "bool", "label": "STOP", "style": "Stop Button"},
+                     {"name": "hi", "type": "bool", "label": "Say hi", "style": "OK Button"}],
+        "indicators": [{"name": "log", "type": "string"}],
+        "constants": [{"name": "etype", "type": {"enum": ["Hello", "Exit"]}, "value": "Hello"}],
+        "functions": [{"name": "obtain", "function": "Obtain Queue"},
+                      {"name": "release", "function": "Release Queue"}],
+        "structures": [
+            {"name": "W", "type": "while_loop", "structures": [{"name": "E", "type": "event", "events": [
+                {"control": "stop", "functions": [{"name": "q_exit", "function": "Enqueue Element"}],
+                 "constants": [{"name": "m_exit", "type": {"enum": ["Hello", "Exit"]}, "value": "Exit"}]},
+                {"control": "hi", "functions": [{"name": "q_hi", "function": "Enqueue Element"}],
+                 "constants": [{"name": "m_hi", "type": {"enum": ["Hello", "Exit"]}, "value": "Hello"}]}]}]},
+            {"name": "C", "type": "while_loop", "functions": [{"name": "deq", "function": "Dequeue Element"}],
+             "structures": [{"name": "H", "type": "case", "output_tunnels": ["msg", "done"], "cases": [
+                 {"value": "Hello", "constants": [{"name": "s_hi", "type": "string", "value": "hi!"},
+                                                  {"name": "f", "type": "bool", "value": False}]},
+                 {"value": "Exit", "constants": [{"name": "s_bye", "type": "string", "value": "bye"},
+                                                 {"name": "t", "type": "bool", "value": True}]}]}]}],
+        "wires": [["etype", "obtain.element data type"],
+                  ["obtain.queue out", "q_exit.queue"], ["m_exit", "q_exit.element"],
+                  ["obtain.queue out", "q_hi.queue"], ["m_hi", "q_hi.element"], ["stop", "W.stop"],
+                  ["obtain.queue out", "deq.queue"], ["deq.element", "H.selector"],
+                  ["s_hi", "msg"], ["f", "done"], ["s_bye", "msg"], ["t", "done"],
+                  ["msg", "log"], ["done", "C.stop"], ["deq.queue out", "release.queue"]],
+    }, {"STOP": 0, "Say hi": 1},
+        ['[0] "STOP": Value Change', '[1] "Say hi": Value Change']),
 }
 
 
@@ -258,9 +308,6 @@ def ui_case(name):
         want = f"{ev['id']}#{k}" if k is not None else None
         if want and term_in.get(label) != want:
             problems.append(f"{label} is in {term_in.get(label)!r}, expected {want!r}")
-    # The "Double it" button has no wires; its terminal still goes into its own frame (latch reset).
-    if term_in.get("Double it") != f"{ev['id']}#1":
-        problems.append(f"Double it is in {term_in.get('Double it')!r}")
     return problems
 
 

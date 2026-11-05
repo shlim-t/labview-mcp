@@ -4,7 +4,7 @@ An [MCP](https://modelcontextprotocol.io) server that lets AI coding agents — 
 
 LabVIEW source code is a binary, graphical format. Text-based coding agents can't open a `.vi` file. labview-mcp acts as the agent's eyes and hands: it drives your installed LabVIEW over its ActiveX server and returns what the agent needs as text, images, and values.
 
-> Status: **v0.11.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth, and **user interfaces**: front-panel styles (buttons, LEDs, knobs, gauges, charts), event structures, and Property and Invoke Nodes. Any existing VI can be read as a graph (`vi_dump`) and changed in place (`vi_edit`: remove, replace, and add code, including inside existing loops and case frames).
+> Status: **v0.12.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth, and **user interfaces**: front-panel styles (buttons, LEDs, knobs, gauges, charts), event structures, and Property and Invoke Nodes. Any existing VI can be read as a graph (`vi_dump`) and changed in place (`vi_edit`: remove, replace, and add code, including inside existing loops and case frames).
 
 ## What the agent can do
 
@@ -125,6 +125,22 @@ A state machine is built from parts that already exist in the spec:
 
 To pass a value through a frame unchanged, give the frame `"pass": [["acc.left", "t"]]`, where the pair is a source and an output tunnel. `tests/live_vi_create.py` (`state_machine`) has a complete example that runs Init → Add ×n → Done.
 
+### Queues: producer/consumer and queued message handlers
+
+Queue functions are ordinary palette functions:
+
+| Function | Terminals |
+|---|---|
+| `Obtain Queue` | Wire a constant of the element type to `element data type`. The output is `queue out`. |
+| `Enqueue Element` | `queue`, `element` |
+| `Dequeue Element` | `queue`, `element`, `queue out` |
+| `Release Queue` | `queue` |
+
+Loops placed side by side run in parallel and share the queue wire. `tests/live_vi_create.py` has two complete examples:
+
+- **`producer_consumer`:** a For Loop enqueues numbers and a While Loop sums them.
+- **`qmh`:** a queued message handler. Button events in a UI loop enqueue enum messages, and a second loop handles each message in a case until `Exit`.
+
 ### User interfaces
 
 `"style"` on a control or indicator replaces it with the Controls-palette object of that name, keeping its label, terminal and wires: `"Stop Button"`, `"OK Button"`, `"Round LED"`, `"Vertical Toggle Switch"` for booleans, `"Knob"`, `"Gauge"`, `"Thermometer"`, `"Waveform Chart"` for numbers.
@@ -229,6 +245,7 @@ agent ──MCP/stdio──▶ labview-mcp ──ActiveX (COM)──▶ LabVIEW.
 - [x] Property and Invoke Nodes, linked to controls or of any VI Server class.
 - [x] `lv_class_properties`: a class's properties by name. Methods are not listed yet.
 - [x] Enums, enum cases, and state machines.
+- [x] Queues: producer/consumer and queued message handlers.
 - [ ] Event structures: Timeout, panel events (Panel Close?), event data (NewVal), editing with `vi_edit`; clicking buttons from `vi_run`.
 - [x] Helper VIs saved for LabVIEW 2015 and later.
 - [ ] Verified on LabVIEW versions older than 2026 and on localized (non-English) LabVIEW.

@@ -232,7 +232,11 @@ _TERM_BAD = re.compile(r"[:\x00-\x1f]")
 # LabVIEW's script parser takes as a terminal index and has crashed on.
 _TERM_NAME_BAD = re.compile(r"[\x00-\x1f]|:\s*\d")
 _CONTENT_KEYS = ("constants", "functions", "subvis", "structures", "property_nodes", "invoke_nodes")
-_NODE_KINDS = ("pnode", "inode")  # Property / Invoke Nodes: configured after they are placed
+_NODE_KINDS = ("pnode", "inode")
+# growable palette functions: their inputs are wired by position, element[i]
+_GROWABLE_FUNCS = {"Concatenate Strings", "Build Array", "Bundle", "Unbundle", "Build Cluster Array",
+                   "Index Array", "Array Subset", "Replace Array Subset", "Insert Into Array",
+                   "Delete From Array", "Array To Cluster", "Merge Errors", "Compound Arithmetic"}  # Property / Invoke Nodes: configured after they are placed
 _STRUCT_TYPES = {"for_loop": "for", "for": "for", "while_loop": "while", "while": "while",
                  "case": "case", "case_structure": "case", "event": "event", "event_structure": "event"}
 # Control events: the value of the "Event Type" enum taken by EventStructure.SetHandledEvents
@@ -524,8 +528,9 @@ class _Builder:
         if k in ("function", "subvi"):
             if not term:
                 raise SpecError(f"wire end {end!r}: give the terminal, e.g. \"{node}.x\"")
-            if k == "function" and term.startswith("element") and not re.fullmatch(r"element\[\d+\]", term):
-                # a bare "element" reference has crashed LabVIEW
+            if (k == "function" and term.startswith("element") and not re.fullmatch(r"element\[\d+\]", term)
+                    and (n.spec.get("size") is not None or n.spec["function"].strip() in _GROWABLE_FUNCS)):
+                # a bare "element" reference on a growable node has crashed LabVIEW
                 raise SpecError(f"wire end {end!r}: wire growable inputs by position as "
                                 f"\"{node}.element[1]\", \"{node}.element[2]\", ...")
             return end
