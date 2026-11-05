@@ -4,7 +4,7 @@ An [MCP](https://modelcontextprotocol.io) server that lets AI coding agents — 
 
 LabVIEW source code is a binary, graphical format. Text-based coding agents can't open a `.vi` file. labview-mcp acts as the agent's eyes and hands: it drives your installed LabVIEW over its ActiveX server and returns what the agent needs as text, images, and values.
 
-> Status: **v0.12.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth, and **user interfaces**: front-panel styles (buttons, LEDs, knobs, gauges, charts), event structures, and Property and Invoke Nodes. Any existing VI can be read as a graph (`vi_dump`) and changed in place (`vi_edit`: remove, replace, and add code, including inside existing loops and case frames).
+> Status: **v0.13.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth, and **user interfaces**: front-panel styles (buttons, LEDs, knobs, gauges, charts), event structures, and Property and Invoke Nodes. Any existing VI can be read as a graph (`vi_dump`) and changed in place (`vi_edit`: remove, replace, and add code, including inside existing loops and case frames).
 
 ## What the agent can do
 
@@ -15,7 +15,7 @@ LabVIEW source code is a binary, graphical format. Text-based coding agents can'
 | `vi_text` | LabVIEW's own string export: front-panel controls (nested for clusters), descriptions, and block-diagram labels and comments. **Case structures are exported one block per case**, including hidden cases. |
 | `vi_snapshot` | PNG images of the block diagram, front panel, or connector pane. `all_frames=true` renders **every hidden case, sequence, and event frame**. |
 | `vi_hierarchy` | The subVI call tree. vi.lib, user.lib, and instr.lib are hidden by default. |
-| `vi_run` | Sets inputs, runs the VI, and returns all front-panel values. Stops VIs that don't finish within the time limit (UI loops). |
+| `vi_run` | Sets inputs, runs the VI, and returns all front-panel values. **While the VI runs, it can operate the front panel as a user would**: click buttons, change values, and read indicators. A UI VI can therefore be tested end to end. It stops VIs that don't finish within the time limit. |
 | `vi_dump` | **The block diagram as a JSON graph**: every node (functions by palette name, constants with their values, subVIs, loops, case frames, tunnels, shift registers, property nodes) and every wire with its source and sinks. Works on any VI, including broken ones. |
 | `vi_edit` | **Changes an existing VI in place.** It removes nodes, adds code, and wires to existing controls, nodes, loops, and case frames (by `vi_dump` id). The rest of the diagram keeps its layout. It backs up the VI first, and reverts instead of saving if the result is broken or a wire could not be made. |
 | `lv_functions` | Searches the palette functions in your LabVIEW install by name. |
@@ -167,7 +167,21 @@ The result follows NI's event-handler pattern:
 - The STOP button is read in its own Value Change frame, which stops the loop.
 - `x` and `y` are used only by the Double it frame, so their terminals are placed in that frame. The knob is therefore read when the button is pressed, not once before the loop.
 
-`"event"` defaults to `"Value Change"`. Other control events include `"Mouse Down"`, `"Mouse Up"`, `"Mouse Enter"`, `"Mouse Leave"`, and `"Key Down"`. Code in a frame can be wired to its own frame and to anything outside the event structure, except shift registers. Event structures are made by `vi_create` only, for now. `vi_run` cannot click buttons, so it stops a UI VI at its time limit.
+To test a UI, give `vi_run` the steps a user would take:
+
+```json
+"actions": [{"set": {"x": 21}}, {"click": "Double it"}, {"read": ["y"]}, {"click": "STOP"}]
+```
+
+- **`click`** presses a button, including a latched one such as STOP.
+- **`set`** changes controls.
+- Both fire the controls' Value Change events, as a real click or edit would.
+- **`read`** records values while the VI runs.
+- **`wait`** pauses for the given number of seconds.
+
+The result lists each step. Here it reads `y = 42` and then the VI stops by itself.
+
+`"event"` defaults to `"Value Change"`. Other control events include `"Mouse Down"`, `"Mouse Up"`, `"Mouse Enter"`, `"Mouse Leave"`, and `"Key Down"`. Code in a frame can be wired to its own frame and to anything outside the event structure, except shift registers. Event structures are made by `vi_create` only, for now. 
 
 ### Property and Invoke Nodes
 
@@ -246,7 +260,8 @@ agent ──MCP/stdio──▶ labview-mcp ──ActiveX (COM)──▶ LabVIEW.
 - [x] `lv_class_properties`: a class's properties by name. Methods are not listed yet.
 - [x] Enums, enum cases, and state machines.
 - [x] Queues: producer/consumer and queued message handlers.
-- [ ] Event structures: Timeout, panel events (Panel Close?), event data (NewVal), editing with `vi_edit`; clicking buttons from `vi_run`.
+- [ ] Event structures: Timeout, panel events (Panel Close?), event data (NewVal), editing with `vi_edit`.
+- [x] `vi_run` operates a running VI's front panel: click, set, read.
 - [x] Helper VIs saved for LabVIEW 2015 and later.
 - [ ] Verified on LabVIEW versions older than 2026 and on localized (non-English) LabVIEW.
 

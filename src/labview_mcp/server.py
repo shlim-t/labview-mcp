@@ -129,14 +129,23 @@ async def vi_run(
     inputs: dict[str, Any] | None = None,
     outputs: list[str] | None = None,
     timeout_s: float = 30.0,
+    actions: list[Any] | None = None,
 ) -> dict:
     """Run a VI and return its front-panel values afterwards.
 
-    inputs: {control label: value} set before running (clusters as lists in element order).
+    inputs: {control label: value} set before running (clusters as lists in element order; enums
+    by item name).
     outputs: labels to read back; default reads every top-level control and indicator.
+    actions: operate the front panel while the VI runs, as a user would, in order:
+      {"click": "Go"}            press a button (works on latched buttons such as STOP)
+      {"set": {"x": 21}}         change controls; fires their Value Change events
+      {"wait": 0.5}              pause, in seconds
+      {"read": ["y", "log"]}     record values at this moment
+    e.g. [{"set": {"x": 21}}, {"read": ["y"]}, {"click": "Go"}, {"click": "STOP"}] tests a UI
+    end to end; the result's "actions" lists what each step did and read.
     A VI still running after timeout_s is aborted (typical for UI loops waiting on a Stop button).
     WARNING: executes code and may drive real hardware — only run VIs the user asked to run."""
-    return await _run(lv.vi_run, path, inputs or {}, outputs, timeout_s)
+    return await _run(lv.vi_run, path, inputs or {}, outputs, timeout_s, actions)
 
 
 @mcp.tool(structured_output=False)
@@ -226,7 +235,7 @@ async def vi_create(
            "events": [{"control": "stop"}, {"control": "go", "functions": [{"name": "m",
            "function": "Multiply"}], "constants": [{"name": "k", "type": "dbl", "value": 2}]}]}]}],
        "wires": [["stop", "W.stop"], ["x", "m.x"], ["k", "m.y"], ["m.x*y", "y"]]}
-    vi_run cannot press buttons, so a UI VI runs until vi_run's time limit stops it.
+    Test a UI with vi_run's "actions" (click buttons, set values, read indicators while it runs).
     Property and Invoke Nodes (top level, in loops, cases and event frames):
       "property_nodes": [{"name": "p", "control": "chart", "properties": ["Visible"], "write": true},
                          {"name": "a", "class": "Application", "properties": ["App.Version"]}],

@@ -247,8 +247,72 @@ class LabVIEW:
             seen[p] = kept
         return {"root": root, "calls": seen, "vilib_callees_hidden": len(skipped_vilib)}
 
+    def _run_actions(self, vi, actions: list, enums: dict, t0: float, timeout_s: float) -> list:
+        """Operate the front panel of a running VI as a user would. Steps: {"click": label} presses a
+        button; {"set": {label: value}} changes controls; both fire Value Change events. {"wait": s}
+        pauses, {"read": [labels]} records values. Returns what each step did."""
+        from win32com.client import VARIANT
+        from . import gen
+        out = []
+        time.sleep(0.3)  # let the VI reach its event structure
+        fp = None
+        for step in actions:
+            if vi.ExecState not in (2, 3):
+                out.append({"step": step, "skipped": "the VI is no longer running"})
+                continue
+            if time.monotonic() - t0 > timeout_s:
+                out.append({"step": step, "skipped": "time limit reached"})
+                continue
+            if not isinstance(step, dict) or len(step) != 1:
+                raise LabVIEWError(f"bad action {step!r}: use {{\"click\": label}}, {{\"set\": {{label: value}}}}, "
+                                   "{\"wait\": seconds} or {\"read\": [labels]}")
+            (kind, arg), = step.items()
+            if kind in ("click", "set"):
+                fp = fp if fp is not None else self._fp_refs_by_label(vi)
+            if kind == "click":
+                if arg not in fp:
+                    raise LabVIEWError(f"click: no control {arg!r}. Labels: {sorted(k for k in fp if k)}")
+                lt = gen.parse_type("bool")
+                h = self._helper(SIGNAL_VI)
+                h.SetControlValue("reference", fp[arg])
+                h.SetControlValue("type string", VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_UI1, lt.td()))
+                h.SetControlValue("data string", VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_UI1, lt.data(True)))
+                self._run_checked(h, f"clicking {arg!r}")
+                out.append({"clicked": arg})
+                time.sleep(0.2)
+            elif kind == "set":
+                if not isinstance(arg, dict):
+                    raise LabVIEWError("set takes {label: value}")
+                for label, value in arg.items():
+                    if label not in fp:
+                        raise LabVIEWError(f"set: no control {label!r}. Labels: {sorted(k for k in fp if k)}")
+                    if label in enums and isinstance(value, str):
+                        value = enums[label].index(value)
+                    try:
+                        vi.SetControlValue(label, value)
+                    except pywintypes.com_error as e:
+                        raise LabVIEWError(f"set {label!r}: {_com_msg(e)}") from None
+                    h = self._helper(FIRE_VI)
+                    h.SetControlValue("reference", fp[label])
+                    self._run_checked(h, f"signalling the change of {label!r}")
+                out.append({"set": arg})
+                time.sleep(0.2)
+            elif kind == "wait":
+                time.sleep(max(0.0, min(float(arg), timeout_s)))
+                out.append({"waited": arg})
+            elif kind == "read":
+                got = {}
+                for label in ([arg] if isinstance(arg, str) else arg):
+                    v = _jsonable(_try(lambda label=label: vi.GetControlValue(label)))
+                    got[label] = enums[label][v] if label in enums and isinstance(v, int) and \
+                        0 <= v < len(enums[label]) else v
+                out.append({"read": got})
+            else:
+                raise LabVIEWError(f"unknown action {kind!r}")
+        return out
+
     def vi_run(self, path: str, inputs: dict[str, Any], outputs: list[str] | None,
-               timeout_s: float) -> dict:
+               timeout_s: float, actions: list | None = None) -> dict:
         vi = self._vi(path)
         if vi.ExecState == 0:
             raise LabVIEWError("VI is broken (has errors) and cannot run. Open it in LabVIEW to see the error list.")
@@ -269,6 +333,7 @@ class LabVIEW:
                     f"Front-panel labels on this VI: {known}") from None
         t0 = time.monotonic()
         vi.Run(True)  # async; we poll so a VI that never stops can be aborted
+        trace = self._run_actions(vi, actions or [], enums, t0, timeout_s) if actions else None
         timed_out = False
         while vi.ExecState in (2, 3):
             if time.monotonic() - t0 > timeout_s:
@@ -287,6 +352,8 @@ class LabVIEW:
             except pywintypes.com_error as e:
                 errors[n] = _com_msg(e)
         res = {"completed": not timed_out, "elapsed_s": elapsed, "values": values}
+        if trace is not None:
+            res["actions"] = trace
         if timed_out:
             res["note"] = (f"Aborted after {timeout_s}s. The VI probably waits for user input "
                            "or runs a loop until a Stop button is pressed.")
@@ -1217,6 +1284,8 @@ PROPLINK_VI = VIS_DIR / "lvmcp_proplink.vi"
 INVOKELINK_VI = VIS_DIR / "lvmcp_invokelink.vi"
 UID_VI = VIS_DIR / "lvmcp_uid.vi"
 ALLPROPS_VI = VIS_DIR / "lvmcp_allprops.vi"
+SIGNAL_VI = VIS_DIR / "lvmcp_signal.vi"
+FIRE_VI = VIS_DIR / "lvmcp_fire.vi"
 _STD_TERMS = {"reference", "reference out", "error in (no error)", "error out"}
 _ANY_STYLE = 4294967295  # GObject.Replace "Style": -1 as U32, find the object by its palette name
 _REMOVE_CORE = Path("vi.lib") / "Utility" / "QuickDropSupport" / "Remove and Rewire Objects_core.vi"

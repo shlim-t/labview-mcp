@@ -105,6 +105,12 @@ def build_helper(lv: LabVIEW, path: Path, spec: dict) -> dict:
     placed = [k for k, n in enumerate(nodes) if not n.get("write")]
     for j, k in enumerate(placed):
         n = nodes[k]
+        if n["kind"] == "constant":  # {"kind": "constant", "type": ..., "value": ...}
+            lt = gen.parse_type(n["type"])
+            tds.append((lt.td(), lt.data(n.get("value"))))
+            xml.append(f"<Constant name=\"n{k}\" typeindex=\"{len(tds) - 1}\" position=\"(100,{10 + 80 * k})\" "
+                       f"out=\"{j}\"></Constant>")
+            continue
         style = {"property": "Property Node", "invoke": "Invoke Node"}.get(n["kind"], n.get("function"))
         xml.append(f"<Function name=\"n{k}\" style={quoteattr(style)} position=\"(200,{10 + 80 * k})\" "
                    f"out=\"{j}\"></Function>")
@@ -145,9 +151,10 @@ def build_helper(lv: LabVIEW, path: Path, spec: dict) -> dict:
         if e in labels:
             return labels[e]
         node, _, term = e.partition(".")
-        return f"{names[node]}.{term}"
+        return f"{names[node]}.{term}" if term else names[node]  # a constant has one terminal
     xml = ["<Script>"]
-    xml += [f"<Function name=\"n{k}\" in=\"{k}\"></Function>" for k in range(len(nodes))]
+    xml += [f"<{t_} name=\"n{k}\" in=\"{k}\"></{t_}>"
+            for k, t_ in enumerate("Constant" if n["kind"] == "constant" else "Function" for n in nodes)]
     xml += [f"<Control name=\"c{k}\" in=\"{len(nodes) + k}\"></Control>" for k in range(len(fps))]
     # LabVIEW's scripting draws a wire from its sink: source = sink, destination = driver
     # Method return values cannot be wired this way (the name resolves to the wrong terminal).
@@ -162,6 +169,20 @@ def build_helper(lv: LabVIEW, path: Path, spec: dict) -> dict:
     t.SaveInstrument(str(path), False, False)
     return {"path": str(path)}
 
+
+
+def _set_value_helper(prop: str) -> dict:
+    return {
+        "controls": [("reference", "ref:Control"), ("type string", "string"), ("data string", "string")],
+        "indicators": [("error out", "error")],
+        "nodes": [{"name": "i16", "kind": "constant", "type": "i16[]", "value": []},
+                  {"name": "tc", "kind": "function", "function": "Type Cast"},
+                  {"name": "fs", "kind": "function", "function": "Flattened String To Variant"},
+                  {"name": "s", "kind": "property", "class": "Control", "items": [prop], "write": True}],
+        "wires": [("type string", "tc.x"), ("i16", "tc.type"), ("tc.*(type *) &x", "fs.type string"),
+                  ("data string", "fs.data string"), ("fs.Variant", f"s.{prop}"), ("reference", "s.reference"),
+                  ("fs.error out", "s.error in (no error)"), ("s.error out", "error out")],
+    }
 
 
 HELPERS: dict[str, dict] = {
@@ -197,6 +218,19 @@ HELPERS: dict[str, dict] = {
         "nodes": [{"name": "a", "kind": "property", "class": "Property", "items": ["AllProps[]"]}],
         "wires": [("reference", "a.reference"), ("a.AllProps2", "properties"), ("a.error out", "error out")],
     },
+    # Control.Value (Signaling): set a control of a running VI as if the user did (fires Value Change).
+    # The value arrives flattened (type string + data string) and becomes a variant here.
+    "lvmcp_signal": _set_value_helper("Val(Sgnl)"),
+    # Control.Value -> Control.Value (Signaling): fire Value Change with the control's current value
+    # (after vi_run set it through COM, which knows its type)
+    "lvmcp_fire": {
+        "controls": [("reference", "ref:Control")],
+        "indicators": [("error out", "error")],
+        "nodes": [{"name": "r", "kind": "property", "class": "Control", "items": ["Value"]},
+                  {"name": "w", "kind": "property", "class": "Control", "items": ["Val(Sgnl)"], "write": True}],
+        "wires": [("reference", "r.reference"), ("r.reference out", "w.reference"), ("r.Value", "w.Val(Sgnl)"),
+                  ("r.error out", "w.error in (no error)"), ("w.error out", "error out")],
+    },
     # Property.Link To Control: make a Property Node an implicit one of a front-panel control
     "lvmcp_proplink": {
         "controls": [("reference", "ref:Property"), ("control", "ref:Control")],
@@ -229,7 +263,7 @@ HELPERS: dict[str, dict] = {
 # Generated in this order: lvmcp_propwrite needs lvmcp_move. lvmcp_replace is still the hand-built one
 # in vis_src (this spec reproduces it; see tests).
 ORDER = ["lvmcp_move", "lvmcp_propwrite", "lvmcp_proplink", "lvmcp_invokelink", "lvmcp_uid", "lvmcp_classname",
-         "lvmcp_allprops"]
+         "lvmcp_allprops", "lvmcp_signal", "lvmcp_fire"]
 
 
 def main(args: list[str]) -> None:

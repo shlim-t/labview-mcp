@@ -282,6 +282,17 @@ UI_CASES = {
 }
 
 
+# UI VIs operated while they run (vi_run actions): steps, and a check of the result. Each run must end
+# by itself (the STOP click), so "completed" is required too.
+UI_RUNS = {
+    "ui_events": ([{"set": {"x": 21}}, {"click": "Double it"}, {"read": ["y"]}, {"click": "STOP"}],
+                  lambda r: r["actions"][2]["read"]["y"] == 42.0),
+    # "log" sits outside the handler loop, so it shows the last message once the loop has ended
+    "qmh": ([{"click": "Say hi"}, {"wait": 0.3}, {"click": "STOP"}],
+            lambda r: r["values"]["log"] == "bye"),
+}
+
+
 def _fill(o):
     if isinstance(o, dict):
         return {k: _fill(v) for k, v in o.items()}
@@ -321,6 +332,15 @@ for name in names:
             problems = [f"error: {str(e)[:300]}"]
         failed += bool(problems)
         print(f"{'FAIL' if problems else 'PASS'} {name}: {problems or 'structure as expected'}")
+        if name in UI_RUNS and not problems:
+            actions, check = UI_RUNS[name]
+            try:
+                r = lv.call(lv.vi_run, os.path.join(D, name + ".vi"), {}, None, 15, actions).result()
+                ok = r["completed"] and check(r)
+            except Exception as e:
+                ok, r = False, str(e)[:300]
+            failed += not ok
+            print(f"{'PASS' if ok else 'FAIL'} {name} (operated): {json.dumps(r.get('actions') if isinstance(r, dict) else r)}")
         try:
             _, imgs = lv.call(lv.vi_snapshot, os.path.join(D, name + ".vi"), True, True, True, False).result()
             for i in imgs:
