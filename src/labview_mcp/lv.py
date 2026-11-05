@@ -254,7 +254,12 @@ class LabVIEW:
             raise LabVIEWError("VI is broken (has errors) and cannot run. Open it in LabVIEW to see the error list.")
         if vi.ExecState in (2, 3):
             raise LabVIEWError("VI is already running.")
+        enums = self._enum_items(path)  # label -> item names; enums go through COM as numbers
         for name, value in (inputs or {}).items():
+            if name in enums and isinstance(value, str):
+                if value not in enums[name]:
+                    raise LabVIEWError(f"'{name}' is an enum with items {enums[name]}, not {value!r}")
+                value = enums[name].index(value)
             try:
                 vi.SetControlValue(name, value)
             except pywintypes.com_error as e:
@@ -277,6 +282,8 @@ class LabVIEW:
         for n in names:
             try:
                 values[n] = _jsonable(vi.GetControlValue(n))
+                if n in enums and isinstance(values[n], int) and 0 <= values[n] < len(enums[n]):
+                    values[n] = enums[n][values[n]]
             except pywintypes.com_error as e:
                 errors[n] = _com_msg(e)
         res = {"completed": not timed_out, "elapsed_s": elapsed, "values": values}
@@ -286,6 +293,22 @@ class LabVIEW:
         if errors:
             res["unreadable"] = errors
         return res
+
+    def _enum_items(self, path: str) -> dict[str, list[str]]:
+        """Front-panel enums of a VI (label -> item names), read from the compiler export. Empty when
+        LabVIEW will not export the VI."""
+        from . import dfir
+        cache = self.__dict__.setdefault("_enum_cache", {})
+        key = (str(path), _try(lambda: os.path.getmtime(path)))
+        if key not in cache:
+            try:
+                g = dfir.parse(self._dfir_text(path))
+                cache[key] = {n["label"]: n["type"]["enum"] for n in g["nodes"]
+                              if n["kind"] in ("control", "indicator") and "in" not in n and n.get("label")
+                              and isinstance(n.get("type"), dict) and "enum" in n["type"]}
+            except (LabVIEWError, ValueError):
+                cache[key] = {}
+        return cache[key]
 
     def vi_create(self, path: str, spec: dict, overwrite: bool, description: str) -> dict:
         from . import gen

@@ -161,6 +161,47 @@ CASES = {
         "property_nodes": [{"name": "r", "control": "x", "properties": ["Disabled", "Visible"]}],
         "wires": [["r.Disabled", "dis"], ["r.Visible", "vis"]],
     }, {}, {"disabled": 0, "visible": True}),
+    # enum control, constant and indicator; values go in and out as item names
+    "enum_basic": ({
+        "controls": [{"name": "s", "type": {"enum": ["Init", "Run", "Stop"]}, "label": "state", "default": "Run"}],
+        "indicators": [{"name": "o", "type": {"enum": ["Init", "Run", "Stop"]}, "label": "same"},
+                       {"name": "k", "type": {"enum": ["Init", "Run", "Stop"]}, "label": "const"}],
+        "constants": [{"name": "c", "type": {"enum": ["Init", "Run", "Stop"]}, "value": "Stop"}],
+        "wires": [["s", "o"], ["c", "k"]],
+    }, {"state": "Init"}, {"same": "Init", "const": "Stop"}),
+    # a state machine: while loop, enum state in a shift register, one case per state.
+    # Init -> Add (n times, accumulating) -> Done (stops the loop)
+    "state_machine": ({
+        "controls": [{"name": "n", "type": "i32", "default": 3}],
+        "indicators": [{"name": "total", "type": "i32"},
+                       {"name": "last", "type": {"enum": ["Init", "Add", "Done"]}, "label": "last state"}],
+        "constants": [{"name": "start", "type": {"enum": ["Init", "Add", "Done"]}, "value": "Init"},
+                      {"name": "zero", "type": "i32", "value": 0}],
+        "structures": [{"name": "W", "type": "while_loop", "shift_registers": ["state", "acc"], "structures": [
+            {"name": "C", "type": "case", "output_tunnels": ["nx", "ao", "st"], "cases": [
+                {"value": "Init",
+                 "constants": [{"name": "k_add", "type": {"enum": ["Init", "Add", "Done"]}, "value": "Add"},
+                               {"name": "z0", "type": "i32", "value": 0},
+                               {"name": "f0", "type": "bool", "value": False}]},
+                {"value": "Add",
+                 "functions": [{"name": "inc", "function": "Increment"},
+                               {"name": "ge", "function": "Greater Or Equal?"},
+                               {"name": "sel", "function": "Select"}],
+                 "constants": [{"name": "k_done", "type": {"enum": ["Init", "Add", "Done"]}, "value": "Done"},
+                               {"name": "k_add2", "type": {"enum": ["Init", "Add", "Done"]}, "value": "Add"},
+                               {"name": "f1", "type": "bool", "value": False}]},
+                {"value": "Done", "pass": [["acc.left", "ao"]],  # acc passes through unchanged
+                 "constants": [{"name": "k_done2", "type": {"enum": ["Init", "Add", "Done"]}, "value": "Done"},
+                               {"name": "t1", "type": "bool", "value": True}]}]}]}],
+        "wires": [["start", "state.left"], ["zero", "acc.left"], ["state.left", "C.selector"],
+                  ["k_add", "nx"], ["z0", "ao"], ["f0", "st"],
+                  ["acc.left", "inc.x"], ["inc.x+1", "ao"], ["inc.x+1", "ge.x"], ["n", "ge.y"],
+                  ["ge.x >= y?", "sel.s"], ["k_done", "sel.t"], ["k_add2", "sel.f"], ["sel.s? t:f", "nx"],
+                  ["f1", "st"],
+                  ["k_done2", "nx"], ["t1", "st"],
+                  ["nx", "state.right"], ["ao", "acc.right"], ["st", "W.stop"],
+                  ["acc.right", "total"], ["state.right", "last"]],
+    }, {}, {"total": 3, "last state": "Done"}),
     # an unlinked Property Node of class Application needs no reference
     "app_version": ({
         "indicators": [{"name": "ver", "type": "string", "label": "version"}],

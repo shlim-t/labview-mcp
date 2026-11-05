@@ -163,7 +163,9 @@ async def vi_create(
     terminal is its Context Help label (Add: x, y, x+y; Multiply: x, y, x*y) or, for a subVI,
     the label of its control/indicator.
     Types: dbl, sgl, i8..i64, u8..u64, bool, string, path; arrays "dbl[]", "string[][]";
-    clusters {"cluster": [{"name": "a", "type": "dbl"}, ...]}.
+    clusters {"cluster": [{"name": "a", "type": "dbl"}, ...]}; enums {"enum": ["Init", "Run", "Stop"]}
+    (values, defaults and vi_run inputs/outputs are item names; a case on an enum has frames
+    {"value": "Init"}, ...).
 
     Structures (top level or nested, in "structures"; they hold constants/functions/subvis/
     structures of their own; all names are global and wires are always listed at the top level):
@@ -190,6 +192,11 @@ async def vi_create(
       String with 2 inputs -> "size": 5, wired as fs.input 1, fs.input 2.
       Unbundle By Name / Bundle By Name cannot pick elements yet; use Unbundle / Bundle.
     A case wired to an error cluster has frames "No Error" and "Error".
+    To pass a value through a case frame unchanged, give that frame "pass": [["acc.left", "t"]]
+    (source, output tunnel); a wire from outside straight to an output tunnel does not work.
+    State machine: a while loop with shift registers ["state", ...], the enum state wired to
+    state.left -> C.selector, one case frame per state, each frame wiring the next state to an
+    output tunnel -> state.right, and a boolean tunnel -> W.stop.
     Connector pane: every control and indicator is wired to the 4x2x2x4 connector pane so the VI
     works as a subVI right away (controls on the left then top, indicators on the right then
     bottom, in spec order). Pin a slot with "connector": "left3" (left0-3, top0-1, bottom0-1,

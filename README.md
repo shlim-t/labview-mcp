@@ -4,7 +4,7 @@ An [MCP](https://modelcontextprotocol.io) server that lets AI coding agents — 
 
 LabVIEW source code is a binary, graphical format. Text-based coding agents can't open a `.vi` file. labview-mcp acts as the agent's eyes and hands: it drives your installed LabVIEW over its ActiveX server and returns what the agent needs as text, images, and values.
 
-> Status: **v0.10.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth, and **user interfaces**: front-panel styles (buttons, LEDs, knobs, gauges, charts), event structures, and Property and Invoke Nodes. Any existing VI can be read as a graph (`vi_dump`) and changed in place (`vi_edit`: remove, replace, and add code, including inside existing loops and case frames).
+> Status: **v0.11.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth, and **user interfaces**: front-panel styles (buttons, LEDs, knobs, gauges, charts), event structures, and Property and Invoke Nodes. Any existing VI can be read as a graph (`vi_dump`) and changed in place (`vi_edit`: remove, replace, and add code, including inside existing loops and case frames).
 
 ## What the agent can do
 
@@ -113,6 +113,18 @@ Wire straight across structure borders and LabVIEW adds the tunnels. For Loops b
 
 **Connector pane:** every control and indicator is wired to the standard 4x2x2x4 connector pane, so a generated VI works as a subVI right away. Inputs go on the left, outputs on the right, and `error` clusters on the bottom corners, as in NI's own VIs. To pin a slot, use `"connector": "left3"`; to leave a terminal unwired, use `"connector": false`. The tool reports the resulting layout.
 
+### Enums and state machines
+
+`{"enum": ["Init", "Add", "Done"]}` is an enum type. Values, defaults, and `vi_run` inputs and outputs use the item names. A case on an enum has one frame per item, such as `{"value": "Init", ...}`.
+
+A state machine is built from parts that already exist in the spec:
+
+- a while loop with a shift register that holds the state;
+- a case structure on the state, with one frame per state;
+- in each frame, the next state wired to an output tunnel that feeds the shift register.
+
+To pass a value through a frame unchanged, give the frame `"pass": [["acc.left", "t"]]`, where the pair is a source and an output tunnel. `tests/live_vi_create.py` (`state_machine`) has a complete example that runs Init → Add ×n → Done.
+
 ### User interfaces
 
 `"style"` on a control or indicator replaces it with the Controls-palette object of that name, keeping its label, terminal and wires: `"Stop Button"`, `"OK Button"`, `"Round LED"`, `"Vertical Toggle Switch"` for booleans, `"Knob"`, `"Gauge"`, `"Thermometer"`, `"Waveform Chart"` for numbers.
@@ -158,7 +170,7 @@ The result follows NI's event-handler pattern:
 
 Strings are stored in the Windows ANSI code page, as LabVIEW does, so characters outside it (for example `é` on Korean Windows) become the closest match.
 
-Types: `dbl sgl i8 i16 i32 i64 u8 u16 u32 u64 bool string path error`, arrays (`"dbl[]"`, `"i32[][]"`), and clusters (`{"cluster": [{"name": "gain", "type": "dbl"}, ...]}`). Function terminals use the names shown in LabVIEW's Context Help. SubVI terminals use the subVI's control labels.
+Types: `dbl sgl i8 i16 i32 i64 u8 u16 u32 u64 bool string path error`, enums (`{"enum": [...]}`), arrays (`"dbl[]"`, `"i32[][]"`), and clusters (`{"cluster": [{"name": "gain", "type": "dbl"}, ...]}`). Function terminals use the names shown in LabVIEW's Context Help. SubVI terminals use the subVI's control labels.
 
 ## Requirements
 
@@ -216,7 +228,8 @@ agent ──MCP/stdio──▶ labview-mcp ──ActiveX (COM)──▶ LabVIEW.
 - [x] `vi_create`: front-panel styles and event structures (control events) for user interfaces.
 - [x] Property and Invoke Nodes, linked to controls or of any VI Server class.
 - [x] `lv_class_properties`: a class's properties by name. Methods are not listed yet.
-- [ ] Event structures: Timeout, panel events (Panel Close?), event data (NewVal), editing with `vi_edit`; enums; clicking buttons from `vi_run`.
+- [x] Enums, enum cases, and state machines.
+- [ ] Event structures: Timeout, panel events (Panel Close?), event data (NewVal), editing with `vi_edit`; clicking buttons from `vi_run`.
 - [x] Helper VIs saved for LabVIEW 2015 and later.
 - [ ] Verified on LabVIEW versions older than 2026 and on localized (non-English) LabVIEW.
 

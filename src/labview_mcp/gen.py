@@ -46,6 +46,7 @@ _ALIASES = {"double": "dbl", "float": "dbl", "float64": "dbl", "single": "sgl", 
             "boolean": "bool", "str": "string"}
 
 TYPE_HELP = ("Types: dbl, sgl, i8, i16, i32, i64, u8, u16, u32, u64, bool, string, path, error; "
+             "enums as {\"enum\": [\"Init\", \"Run\", \"Stop\"]} (values are item names); "
              "arrays by suffix (\"dbl[]\", \"string[][]\"); clusters as "
              "{\"cluster\": [{\"name\": \"a\", \"type\": \"dbl\"}, ...]}.")
 
@@ -56,6 +57,7 @@ class LVType:
     elem: "LVType | None" = None  # array element
     dims: int = 0
     fields: "list[tuple[str, LVType]] | None" = None  # cluster elements
+    items: "list[str] | None" = None  # enum item names
 
     # -- flattened type descriptor
     def td(self, name: str | None = None) -> bytes:
@@ -73,6 +75,10 @@ class LVType:
         elif self.kind == "cluster":
             code = 0x50
             body = struct.pack(">H", len(self.fields)) + b"".join(t.td(n) for n, t in self.fields)
+        elif self.kind == "enum":  # U16 enum: item count, then the item names as Pascal strings
+            code = 0x16
+            names = [_lv_text(x) for x in self.items]
+            body = struct.pack(">H", len(names)) + b"".join(bytes([len(b)]) + b for b in names)
         else:  # pragma: no cover
             raise SpecError(f"unsupported type {self.kind}")
         flags = 0
@@ -102,6 +108,8 @@ class LVType:
                 raise SpecError(f"value {v!r} does not fit type {k}: {e}") from None
         if k == "bool":
             return b"\x01" if v else b"\x00"
+        if k == "enum":
+            return struct.pack(">H", self.enum_index(v))
         if k == "string":
             b = _lv_text(v)
             return struct.pack(">i", len(b)) + b
@@ -121,6 +129,17 @@ class LVType:
                 raise SpecError(f"cluster value needs {len(self.fields)} elements, got {len(v)}")
             return b"".join(t.data(x) for (_, t), x in zip(self.fields, v))
         raise SpecError(f"unsupported type {k}")  # pragma: no cover
+
+    def enum_index(self, v) -> int:
+        if v is None:
+            return 0
+        if isinstance(v, str):
+            if v not in self.items:
+                raise SpecError(f"{v!r} is not an item of the enum {self.items}")
+            return self.items.index(v)
+        if isinstance(v, int) and not isinstance(v, bool) and 0 <= v < len(self.items):
+            return v
+        raise SpecError(f"enum value {v!r}: give an item name from {self.items}")
 
 
 def _lv_text(v) -> bytes:
@@ -173,6 +192,13 @@ def _flatten_path(v) -> bytes:
 
 
 def parse_type(t: Any) -> LVType:
+    if isinstance(t, dict) and "enum" in t:
+        items = t["enum"]
+        if (not isinstance(items, list) or not items or len(items) > 1000
+                or not all(isinstance(x, str) and x and len(_lv_text(x)) < 256 for x in items)
+                or len(set(items)) != len(items)):
+            raise SpecError("enum type must be {\"enum\": [\"Init\", \"Run\", \"Stop\"]}: distinct, non-empty names")
+        return LVType("enum", items=list(items))
     if isinstance(t, dict):
         fields = t.get("cluster")
         if not isinstance(fields, list) or not fields:
@@ -200,8 +226,11 @@ def parse_type(t: Any) -> LVType:
 
 # ---- spec -> XML -------------------------------------------------------------
 _NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
-# ":" in a terminal reference has crashed LabVIEW; everything else is XML-escaped.
+# ":" in a name has crashed LabVIEW; everything else is XML-escaped.
 _TERM_BAD = re.compile(r"[:\x00-\x1f]")
+# In a terminal name a colon is fine ("s? t:f", Select's output) except as "name:<number>", which
+# LabVIEW's script parser takes as a terminal index and has crashed on.
+_TERM_NAME_BAD = re.compile(r"[\x00-\x1f]|:\s*\d")
 _CONTENT_KEYS = ("constants", "functions", "subvis", "structures", "property_nodes", "invoke_nodes")
 _NODE_KINDS = ("pnode", "inode")  # Property / Invoke Nodes: configured after they are placed
 _STRUCT_TYPES = {"for_loop": "for", "for": "for", "while_loop": "while", "while": "while",
@@ -322,6 +351,7 @@ class _Builder:
         self.types: list[tuple[bytes, bytes]] = []
         self.out_index: dict[str, int] = {}  # new objects whose references the script returns
         self.event_order: list[str] = []     # event structures in emit (= creation) order
+        self.extra_wires: list = []           # wires the builder adds itself (case "pass")
 
     # -- collection
     def add(self, name, kind, container, spec, owner=""):
@@ -447,7 +477,7 @@ class _Builder:
             for i, fr in enumerate(cases):
                 if not isinstance(fr, dict):
                     raise SpecError(f"case {name!r}: each entry of cases must be an object")
-                extra = set(fr) - {"value", "default", *_CONTENT_KEYS}
+                extra = set(fr) - {"value", "default", "pass", *_CONTENT_KEYS}
                 if extra:
                     raise SpecError(f"case {name!r} frame {i}: unknown keys {sorted(extra)}")
                 if fr.get("value") is None and not fr.get("default"):
@@ -456,8 +486,21 @@ class _Builder:
                 self.owner_of[fid] = name
                 self.children[fid] = []
                 self.collect(fr, fid)
-            for t in st.get("output_tunnels", []) or []:
+            tunnels = list(st.get("output_tunnels", []) or [])
+            for t in tunnels:
                 self.add(t, "tunnel", container, {}, owner=name)
+            # "pass": [[source, tunnel]] passes a value through this frame unchanged. A wire from
+            # outside straight to an output tunnel would land on the tunnel's outer side, so the
+            # value goes through an Always Copy node in the frame.
+            for i, fr in enumerate(cases):
+                for k, pw in enumerate(fr.get("pass") or []):
+                    if not (isinstance(pw, (list, tuple)) and len(pw) == 2 and pw[1] in tunnels
+                            and isinstance(pw[0], str)):
+                        raise SpecError(f"case {name!r} frame {i}: \"pass\" is a list of [source, output "
+                                        f"tunnel] pairs; output tunnels: {tunnels}")
+                    cp = f"_pass_{name}_{i}_{k}"
+                    self.add(cp, "function", f"{name}#{i}", {"name": cp, "function": "Always Copy"})
+                    self.extra_wires += [[pw[0], f"{cp}.Input"], [f"{cp}.Output", pw[1]]]
         extra = set(st) - allowed
         if extra:
             raise SpecError(f"structure {name!r}: unknown keys {sorted(extra)}. {STRUCTURE_HELP}")
@@ -468,7 +511,7 @@ class _Builder:
         n = self.nodes.get(node)
         if n is None:
             raise SpecError(f"wire end {end!r}: no node named {node!r}")
-        if term and _TERM_BAD.search(term):
+        if term and _TERM_NAME_BAD.search(term):
             raise SpecError(f"wire end {end!r}: bad terminal name")
         k = n.kind
         if k in _NODE_KINDS:
@@ -795,7 +838,9 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
         if c.get("default") is not None:
             if c["_ind"]:
                 raise SpecError(f"indicator {c['name']!r} cannot have a default")
-            defaults[labels[c["name"]]] = c["default"]
+            t = parse_type(c.get("type", "dbl"))
+            # an enum's value goes through COM as its item index
+            defaults[labels[c["name"]]] = t.enum_index(c["default"]) if t.kind == "enum" else c["default"]
     b.collect(spec, "")
     if not edit and not existing and not any(n.kind not in ("control", "indicator") for n in b.nodes.values()):
         # A diagram holding only terminals is saved by LabVIEW as a file it cannot reopen.
@@ -810,7 +855,7 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
                 if fr.get("event", "Value Change") == "Value Change" and b.nodes[fr["control"]].kind == "control":
                     vc_frame[fr["control"]] = None if fr["control"] in vc_frame else f"{n.name}#{i}"
     vc_frame = {k: v for k, v in vc_frame.items() if v}
-    for w in spec.get("wires", []) or []:
+    for w in list(spec.get("wires", []) or []) + b.extra_wires:
         if isinstance(w, dict):
             w = [w.get("from"), w.get("to")]
         if not (isinstance(w, (list, tuple)) and len(w) == 2 and all(isinstance(x, str) for x in w)):

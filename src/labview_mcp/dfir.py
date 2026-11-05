@@ -41,6 +41,16 @@ def c_string_bytes(s: str) -> bytes:
 _NUM = {0x01: ("i8", "b", 1), 0x02: ("i16", "h", 2), 0x03: ("i32", "i", 4), 0x04: ("i64", "q", 8),
         0x05: ("u8", "B", 1), 0x06: ("u16", "H", 2), 0x07: ("u32", "I", 4), 0x08: ("u64", "Q", 8),
         0x09: ("sgl", "f", 4), 0x0A: ("dbl", "d", 8)}
+_ENUM = {0x15: ("B", 1), 0x16: ("H", 2), 0x17: ("I", 4)}  # U8 / U16 / U32 enums
+
+
+def _text(raw: bytes) -> str:
+    for enc in ("mbcs", "utf-8", "latin-1"):  # LabVIEW strings use the ANSI code page
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("latin-1")
 
 
 class TypeTable:
@@ -92,6 +102,18 @@ class TypeTable:
             k = struct.unpack_from("<H", body, 0)[0]
             at = 2 + 2 * k
             td.update(kind="cluster", fields=[struct.unpack_from("<H", body, 2 + 2 * i)[0] for i in range(k)])
+        elif code in _ENUM and len(body) >= 2:  # enum: item count, Pascal-string items
+            k = struct.unpack_from("<H", body, 0)[0]
+            at, items = 2, []
+            for _ in range(k):
+                if at >= len(body):
+                    break
+                ln = body[at]
+                items.append(_text(body[at + 1:at + 1 + ln]))
+                at += 1 + ln
+            if at + 1 < len(body) and body[at] == 0:  # a pad byte before the name
+                at += 1
+            td.update(kind="enum", items=items)
         else:
             td["kind"] = f"type_0x{code:02x}"
         td["name"] = self._name(body, at) if named and at is not None else ""
@@ -111,6 +133,8 @@ class TypeTable:
                 return "error"
             return {"cluster": [{"name": self.tds[f]["name"], "type": self.describe(f, depth + 1)}
                                 for f in td["fields"] if f < len(self.tds)]}
+        if k == "enum":
+            return {"enum": td["items"]}
         return k
 
     def root(self) -> int | None:
@@ -125,6 +149,10 @@ class TypeTable:
             return struct.unpack_from("<" + fmt, b, p)[0], p + size
         if k == "bool":
             return bool(b[p]), p + 1
+        if k == "enum":
+            fmt, size = _ENUM[td["code"]]
+            v = struct.unpack_from("<" + fmt, b, p)[0]
+            return (td["items"][v] if v < len(td["items"]) else v), p + size
         if k == "string":
             n = struct.unpack_from("<i", b, p)[0]
             raw = b[p + 4:p + 4 + n]
@@ -445,6 +473,17 @@ def parse(text: str, catalog: dict[str, list[str]] | None = None, subvi_terms=No
         if not n.get("in"):
             n.pop("in", None)
         out_nodes.append(n)
+    # A case driven by an enum: show frame values as item names, not item numbers.
+    for n in out_nodes:
+        if n.get("kind") != "case":
+            continue
+        sel = next((e["type"] for e in edges.values()
+                    if f"{n['id']}.selector" in e["to"] and isinstance(e["type"], dict) and "enum" in e["type"]), None)
+        if sel:
+            items = sel["enum"]
+            for fr in n.get("frames", []):
+                fr["values"] = [items[int(v)] if v.lstrip("-").isdigit() and 0 <= int(v) < len(items) else v
+                                for v in fr["values"]]
     return {
         "nodes": out_nodes,
         "wires": [e for e in edges.values() if e["from"] or e["to"]],
