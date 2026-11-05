@@ -250,6 +250,14 @@ CONTROL_EVENTS = {
     "Shortcut Menu Selection (App)": 53, "Shortcut Menu Selection? (App)": 54,
     "Shortcut Menu Selection (User)": 55,
 }
+# Events of the VI itself (no "control"): the Event Type value taken as a Static App/VI Event (same
+# enum; measured on LabVIEW 2026 by registering each value and reading EventStructure.EventSelectors).
+VI_EVENTS = {
+    "Timeout": 1, "Application Instance Close": 4, "Application Instance Close?": 5,
+    "Key Down": 28, "Key Down?": 29, "Key Repeat": 30, "Key Repeat?": 31, "Key Up": 32,
+    "Menu Selection (App)": 35, "Menu Selection? (App)": 36, "Menu Selection (User)": 37,
+    "Mouse Enter": 40, "Mouse Leave": 41, "Panel Close": 47, "Panel Close?": 48, "Panel Resize": 49,
+}
 # Friendly names for structure terminals -> LabVIEW's names.
 _STRUCT_TERMS = {
     "for": {"N": "Loop Count", "count": "Loop Count", "i": "Loop Counter", "iteration": "Loop Counter",
@@ -268,7 +276,11 @@ STRUCTURE_HELP = (
     "while loops take \"stop_if_true\" (default true). A case holds \"cases\": [{\"value\": true | 3 | "
     "\"apple\", \"default\": false, ...contents}] and optional \"output_tunnels\": [\"t\"]. An event "
     "structure holds \"events\": [{\"control\": \"stop\", \"event\": \"Value Change\", ...contents}], one "
-    "frame per entry; \"control\" is the name of a control or indicator in the spec.")
+    "frame per entry; \"control\" is the name of a control or indicator in the spec. Events of the VI "
+    "itself have no \"control\": {\"event\": \"Timeout\", \"timeout\": 100} (ms), \"Panel Close?\", "
+    "\"Key Down\", ... An entry may name its event data node, \"data\": \"d\" (wire \"d.NewVal\", "
+    "\"d.OldVal\", \"d.Coords\", ...), and for filter events (ending in \"?\") its filter node, "
+    "\"filter\": \"f\" (wire a True constant to \"f.Discard?\").")
 
 
 NODE_HELP = (
@@ -365,7 +377,7 @@ class _Builder:
         if name in self.nodes:
             raise SpecError(f"duplicate name {name!r}")
         self.nodes[name] = _Node(name, kind, container, spec, owner)
-        if kind not in ("shiftreg", "tunnel", "existing"):
+        if kind not in ("shiftreg", "tunnel", "existing", "evdata"):
             self.children[container].append(name)
 
     def add_existing(self, name: str, kind: str, bind: int, extra: dict):
@@ -458,20 +470,39 @@ class _Builder:
             for i, fr in enumerate(events):
                 if not isinstance(fr, dict):
                     raise SpecError(f"event structure {name!r}: each entry of events must be an object")
-                extra = set(fr) - {"control", "event", *_CONTENT_KEYS}
+                extra = set(fr) - {"control", "event", "data", "filter", "timeout", *_CONTENT_KEYS}
                 if extra:
                     raise SpecError(f"event structure {name!r} event {i}: unknown keys {sorted(extra)}")
-                src = self.nodes.get(fr.get("control"))
-                if src is None or src.kind not in ("control", "indicator"):
-                    raise SpecError(f"event structure {name!r} event {i}: \"control\" must name a control "
-                                    "or indicator of this spec")
                 ev = fr.get("event", "Value Change")
-                if ev not in CONTROL_EVENTS:
-                    raise SpecError(f"event structure {name!r} event {i}: unknown event {ev!r}. Events: "
-                                    f"{sorted(CONTROL_EVENTS)}")
+                where = f"event structure {name!r} event {i}"
+                if fr.get("control") is not None:
+                    src = self.nodes.get(fr.get("control"))
+                    if src is None or src.kind not in ("control", "indicator"):
+                        raise SpecError(f"{where}: \"control\" must name a control or indicator of this spec")
+                    if ev not in CONTROL_EVENTS:
+                        raise SpecError(f"{where}: unknown control event {ev!r}. Events: {sorted(CONTROL_EVENTS)}"
+                                        f"; events of the VI itself (no \"control\"): {sorted(VI_EVENTS)}")
+                elif ev not in VI_EVENTS:
+                    raise SpecError(f"{where}: {ev!r} needs a \"control\". Events of the VI itself (no "
+                                    f"\"control\"): {sorted(VI_EVENTS)}")
+                if ev == "Timeout":
+                    t = fr.get("timeout")
+                    if not isinstance(t, int) or isinstance(t, bool) or t < 0:
+                        raise SpecError(f"{where}: a Timeout event needs \"timeout\": milliseconds to wait "
+                                        "for other events, e.g. 100")
+                    if sum(e.get("event") == "Timeout" for e in events) > 1:
+                        raise SpecError(f"event structure {name!r} has more than one Timeout event")
+                elif "timeout" in fr:
+                    raise SpecError(f"{where}: \"timeout\" belongs to the Timeout event")
+                if "filter" in fr and not ev.endswith("?"):
+                    raise SpecError(f"{where}: only filter events (ending in \"?\", e.g. \"Panel Close?\") "
+                                    "have a filter node")
                 fid = f"{name}#{i}"
                 self.owner_of[fid] = name
                 self.children[fid] = []
+                for role in ("data", "filter"):
+                    if fr.get(role) is not None:
+                        self.add(fr[role], "evdata", fid, {"role": role})
                 self.collect(fr, fid)
         else:
             allowed = {"name", "type", "cases", "output_tunnels"}
@@ -518,6 +549,12 @@ class _Builder:
         if term and _TERM_NAME_BAD.search(term):
             raise SpecError(f"wire end {end!r}: bad terminal name")
         k = n.kind
+        if k == "evdata":
+            if not term:
+                raise SpecError(f"wire end {end!r}: give the item, e.g. \"{node}.NewVal\""
+                                if n.spec["role"] == "data" else f"wire end {end!r}: give the item, e.g. "
+                                f"\"{node}.Discard?\"")
+            return end
         if k in _NODE_KINDS:
             if not term:
                 raise SpecError(f"wire end {end!r}: give the terminal: a property (\"{node}.Visible\"), a "
@@ -857,7 +894,8 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
     for n in list(b.nodes.values()):
         if n.kind == "event":
             for i, fr in enumerate(n.spec["events"]):
-                if fr.get("event", "Value Change") == "Value Change" and b.nodes[fr["control"]].kind == "control":
+                if (fr.get("control") and fr.get("event", "Value Change") == "Value Change"
+                        and b.nodes[fr["control"]].kind == "control"):
                     vc_frame[fr["control"]] = None if fr["control"] in vc_frame else f"{n.name}#{i}"
     vc_frame = {k: v for k, v in vc_frame.items() if v}
     for w in list(spec.get("wires", []) or []) + b.extra_wires:
@@ -991,26 +1029,38 @@ def _plan_events(b: _Builder, frame_wires: dict, main_wires: list, labels: dict)
                         "loop or case structures outside the event structure, but not to shift registers "
                         "or to code in another event frame")
                 b.out_index.setdefault(o, len(b.out_index))
-            ctl = fr["control"]
+            ctl = fr.get("control")
+            ev_nodes = {m: {"role": b.nodes[m].spec["role"],
+                            "items": sorted({e.partition(".")[2] for w in fw for e in w
+                                             if e.partition(".")[0] == m})}
+                        for m in b.nodes if b.nodes[m].kind == "evdata" and b.nodes[m].container == fid}
             # NI's practice: a front-panel terminal used by one event case sits in that case, so a
             # control is read when the event happens (not once before the loop) and an indicator is
             # written there. A button's own Value Change case reads it even when it is not wired (a
             # latched button resets only when its terminal is read).
             other = outside_wired | {e for f2, w2 in frame_wires.items() if f2 != fid for e in ends(w2)}
             terms = [o for o in bind if b.nodes[o].kind in ("control", "indicator") and o not in other]
-            if (b.nodes[ctl].kind == "control" and fr.get("event", "Value Change") == "Value Change"
+            if (ctl and b.nodes[ctl].kind == "control" and fr.get("event", "Value Change") == "Value Change"
                     and ctl not in other and ctl not in terms):
                 terms.append(ctl)
             contents = {k: v for k, v in fr.items() if k in _CONTENT_KEYS}
             script = None
             if fw or any(contents.values()):
                 script = build({**contents, "wires": fw},
-                               existing=[{"name": o, "kind": _FRAME_BIND[b.nodes[o].kind]} for o in bind],
+                               existing=[{"name": o, "kind": _FRAME_BIND[b.nodes[o].kind]} for o in bind]
+                               + [{"name": m, "kind": "function"} for m in ev_nodes],
                                origin=(40, 40), edit=True)
                 if script.events:
                     raise SpecError(f"event {name!r} frame {i}: an event structure inside an event "
                                     "frame is not supported")
-            frames.append({"control": labels[ctl], "event": CONTROL_EVENTS[fr.get("event", "Value Change")],
-                           "move": [labels[t] for t in terms], "bind": bind, "script": script})
-        events.append({"name": name, "frames": frames})
+            ev = fr.get("event", "Value Change")
+            frames.append({"control": labels[ctl] if ctl else None,
+                           "event": CONTROL_EVENTS[ev] if ctl else VI_EVENTS[ev], "event_name": ev,
+                           "move": [labels[t] for t in terms], "bind": bind + list(ev_nodes),
+                           "evdata": ev_nodes, "script": script})
+        entry = {"name": name, "frames": frames}
+        tmo = next((fr for fr in n.spec["events"] if fr.get("event") == "Timeout"), None)
+        if tmo is not None:  # wired to the structure's Timeout terminal once it exists
+            entry["timeout"] = tmo["timeout"]
+        events.append(entry)
     return events

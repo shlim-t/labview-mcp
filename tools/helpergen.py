@@ -262,8 +262,44 @@ HELPERS: dict[str, dict] = {
 }
 # Generated in this order: lvmcp_propwrite needs lvmcp_move. lvmcp_replace is still the hand-built one
 # in vis_src (this spec reproduces it; see tests).
+# Terminal.Create Constant: a constant wired to a terminal (e.g. an event structure's Timeout,
+# which has no name a script could wire), with the value given flattened as for lvmcp_signal
+HELPERS["lvmcp_termconst"] = {
+    "controls": [("reference", "ref:Terminal"), ("type string", "string"), ("data string", "string")],
+    "indicators": [("error out", "error")],
+    "nodes": [{"name": "i16", "kind": "constant", "type": "i16[]", "value": []},
+              {"name": "tc", "kind": "function", "function": "Type Cast"},
+              {"name": "fs", "kind": "function", "function": "Flattened String To Variant"},
+              {"name": "k", "kind": "invoke", "class": "Terminal", "method": "Create Constant"}],
+    "wires": [("type string", "tc.x"), ("i16", "tc.type"), ("tc.*(type *) &x", "fs.type string"),
+              ("data string", "fs.data string"), ("fs.Variant", "k.Value"), ("reference", "k.reference"),
+              ("fs.error out", "k.error in (no error)"), ("k.error out", "error out")],
+}
+# NamedUnbundler.OutputCnt (write): how many items an event data node shows. A data node made by
+# scripting shows only Source, Type and Time; more items (NewVal, Coords, ...) appear in order.
+HELPERS["lvmcp_outcnt"] = {
+    "controls": [("reference", "ref:NamedUnbundler"), ("count", "i32")],
+    "indicators": [("error out", "error")],
+    "nodes": [{"name": "w", "kind": "property", "class": "NamedUnbundler", "items": ["OutputCnt"], "write": True}],
+    "wires": [("reference", "w.reference"), ("count", "w.OutputCnt"), ("w.error out", "error out")],
+}
+# EventStructure.Timeout Terminal: the terminal to wire the timeout (ms) to
+HELPERS["lvmcp_timeoutterm"] = {
+    "controls": [("reference", "ref:EventStructure")],
+    "indicators": [("terminal", "ref:GObject"), ("error out", "error")],
+    "nodes": [{"name": "p", "kind": "property", "class": "EventStructure", "items": ["TimeoutTerminal"]}],
+    "wires": [("reference", "p.reference"), ("p.TimeoutTerminal", "terminal"), ("p.error out", "error out")],
+}
+# EventStructure.Event Selectors: each frame's caption, e.g. ' "stop": Value Change ' or ' Timeout '
+HELPERS["lvmcp_eventsel"] = {
+    "controls": [("reference", "ref:EventStructure")],
+    "indicators": [("selectors", "string[]"), ("error out", "error")],
+    "nodes": [{"name": "p", "kind": "property", "class": "EventStructure", "items": ["EventSelectors"]}],
+    "wires": [("reference", "p.reference"), ("p.EventSelectors", "selectors"), ("p.error out", "error out")],
+}
+
 ORDER = ["lvmcp_move", "lvmcp_propwrite", "lvmcp_proplink", "lvmcp_invokelink", "lvmcp_uid", "lvmcp_classname",
-         "lvmcp_allprops", "lvmcp_signal", "lvmcp_fire"]
+         "lvmcp_allprops", "lvmcp_signal", "lvmcp_fire", "lvmcp_timeoutterm", "lvmcp_eventsel", "lvmcp_termconst", "lvmcp_outcnt"]
 
 
 def main(args: list[str]) -> None:

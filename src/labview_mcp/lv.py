@@ -444,10 +444,13 @@ class LabVIEW:
             "script_xml": script.xml,
         }
         if script.events:
-            names = {v: k for k, v in gen.CONTROL_EVENTS.items()}
-            res["event_frames"] = {ev["name"]: [f"[{i}] \"{fr['control']}\": {names[fr['event']]}"
-                                                for i, fr in enumerate(ev["frames"])]
-                                   for ev in script.events}
+            # the frames as LabVIEW shows them (its Event Selectors), e.g. '[0] "STOP": Value Change'
+            sel = _try(lambda: self.event_selectors(target)) or []
+            res["event_frames"] = {}
+            for j, ev in enumerate(script.events):
+                caps = sel[j] if j < len(sel) else [
+                    (f"\"{fr['control']}\": " if fr["control"] else "") + fr["event_name"] for fr in ev["frames"]]
+                res["event_frames"][ev["name"]] = [f"[{i}] {c}" for i, c in enumerate(caps)]
         if script.styles:
             res["styled"] = script.styles
         made = self._sink_count(str(p))
@@ -638,7 +641,7 @@ class LabVIEW:
                     "\"OK Button\", \"Round LED\", \"Vertical Toggle Switch\" for booleans; \"Knob\", "
                     "\"Gauge\", \"Thermometer\", \"Waveform Chart\" for numbers.")
 
-    def _event_frame_diagrams(self, target) -> list[list]:
+    def _event_frame_diagrams(self, target, uids: bool = False) -> list[list]:
         """Diagram refnums of every event frame: one list per event structure in creation order,
         frames in creation order (UIDs grow as objects are created)."""
         h = self._helper(UIDS_VI)
@@ -651,7 +654,7 @@ class LabVIEW:
         h.Run(False)
         rows = sorted(zip(h.GetControlValue("UIDs") or (), h.GetControlValue("Owner UIDs") or (),
                           h.GetControlValue("References") or ()))
-        return [[r for _, o, r in rows if o == ev] for ev in evs]
+        return [[(u if uids else r) for u, o, r in rows if o == ev] for ev in evs]
 
     def _build_events(self, target, events: list, outs: dict, labels: dict) -> None:
         """Give each new event structure its frames: register the events, then generate each frame's
@@ -671,12 +674,21 @@ class LabVIEW:
                 # Frame 0 is the Timeout frame LabVIEW makes; registering an event replaces it.
                 reg.SetControlValue("reference", es)
                 reg.SetControlValue("Frame Index", i)
-                reg.SetControlValue("Static App/VI Events", VARIANT(arr, []))
-                # cluster order: Event Type, Reference, Limit (-1 = none), Lock Panel?
-                reg.SetControlValue("Static Control Events", VARIANT(
-                    arr, [VARIANT(arr, [fr["event"], fp[fr["control"]], -1, False])]))
+                if fr["control"] is not None:
+                    reg.SetControlValue("Static App/VI Events", VARIANT(arr, []))
+                    # cluster order: Event Type, Reference, Limit (-1 = none), Lock Panel?
+                    reg.SetControlValue("Static Control Events", VARIANT(
+                        arr, [VARIANT(arr, [fr["event"], fp[fr["control"]], -1, False])]))
+                else:  # an event of this VI: Event Type, Limit, Lock Panel? (no reference)
+                    reg.SetControlValue("Static Control Events", VARIANT(arr, []))
+                    reg.SetControlValue("Static App/VI Events", VARIANT(
+                        arr, [VARIANT(arr, [fr["event"], -1, False])]))
                 self._run_checked(reg, f"registering the event of frame {i} of {ev['name']!r}")
         _try(lambda: reg.SetControlValue("Static Control Events", VARIANT(arr, [])))
+        _try(lambda: reg.SetControlValue("Static App/VI Events", VARIANT(arr, [])))
+        for ev in events:
+            if ev.get("timeout") is not None:
+                self._set_timeout(outs[ev["name"]], ev["timeout"], ev["name"])
         n_frames = [len(ev["frames"]) for ev in events]
         if [len(d) for d in self._event_frame_diagrams(target)] != n_frames:
             raise LabVIEWError("could not find the frames of the new event structures")
@@ -690,7 +702,21 @@ class LabVIEW:
                     passes.append((f"<Script>{xml}</Script>", [], [], [fp[t] for t in fr["move"]]))
                 if fr["script"] is not None:
                     s = fr["script"]
-                    passes.append((s.xml, s.type_strings, s.data_strings, [outs[n] for n in fr["bind"]]))
+                    ednodes = self._event_data_nodes(target, j, i) if fr["evdata"] else {}
+                    refs = []
+                    for n in fr["bind"]:
+                        if n in fr["evdata"]:
+                            role = fr["evdata"][n]["role"]
+                            if role not in ednodes:
+                                raise LabVIEWError(f"event frame {i} of {ev['name']!r} ({fr['event_name']}) "
+                                                   f"has no event {role} node")
+                            if role == "data":
+                                self._show_event_data(target, ednodes["data"], fr["evdata"][n]["items"],
+                                                      f"{n!r} ({fr['event_name']})")
+                            refs.append(ednodes[role][1])
+                        else:
+                            refs.append(outs[n])
+                    passes.append((s.xml, s.type_strings, s.data_strings, refs))
 
                 def on_frame(xml, ts, ds, refs, j=j, i=i):
                     # the helper closes the diagram reference it is given, so look it up each time
@@ -705,6 +731,73 @@ class LabVIEW:
                 if fr["script"] is not None:
                     self._finish_nodes(target, fr["script"], list(self._gen_out), passes[-1][3], labels,
                                        lambda s, refs, f=on_frame: f(s.xml, s.type_strings, s.data_strings, refs))
+
+    def _event_data_nodes(self, target, j: int, i: int) -> dict:
+        """The event data node ("data", an unbundler on the left of the frame) and, for filter events,
+        the event filter node ("filter", a bundler on the right) of frame i of event structure j."""
+        uid = self._event_frame_diagrams(target, uids=True)[j][i]
+        found = {}
+        h = self._helper(UIDS_VI)
+        h.SetControlValue("VI Refnum", target)
+        h.SetControlValue("Traverse Target", 1)
+        h.SetControlValue("Class Name", "Node")
+        h.Run(False)
+        for u, c, o, r in zip(h.GetControlValue("UIDs") or (), h.GetControlValue("Classes") or (),
+                              h.GetControlValue("Owner UIDs") or (), h.GetControlValue("References") or ()):
+            if o == uid and c in ("NamedUnbundler", "NamedBundler"):
+                found.setdefault("data" if c == "NamedUnbundler" else "filter", (u, r))
+        return found
+
+    def _show_event_data(self, target, node, wanted: list, what: str) -> None:
+        """A scripted event data node shows only Source, Type and Time. Show more items, in LabVIEW's
+        order, until the wired ones are there (OutputCnt repeats the last item past the end)."""
+        uid, ref = node
+        h = self._helper(OUTCNT_VI)
+
+        def names():
+            return [n for _, n in self._owned(target, "Terminal", uid, names=True)][1:]  # minus the input
+        have = names()
+        while not set(wanted) <= set(have):
+            h.SetControlValue("reference", ref)
+            h.SetControlValue("count", len(have) + 1)
+            self._run_checked(h, "showing event data items")
+            more = names()
+            if len(more) <= len(have) or more[-1] in more[:-1]:
+                h.SetControlValue("count", len(have))
+                self._run_checked(h, "showing event data items")
+                raise LabVIEWError(f"event data {what} has no item {sorted(set(wanted) - set(have))}; "
+                                   f"its items are {have}")
+            have = more
+
+    def _set_timeout(self, es, ms: int, name: str) -> None:
+        """Wire a constant of `ms` to the event structure's Timeout terminal. That terminal has no name
+        a script can wire, so the constant is made from the terminal itself (Terminal.Create Constant)."""
+        from win32com.client import VARIANT
+        from . import gen
+        h = self._helper(TIMEOUTTERM_VI)
+        h.SetControlValue("reference", es)
+        self._run_checked(h, f"finding the Timeout terminal of {name!r}")
+        lt = gen.parse_type("i32")
+        c = self._helper(TERMCONST_VI)
+        c.SetControlValue("reference", h.GetControlValue("terminal"))
+        c.SetControlValue("type string", VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_UI1, lt.td()))
+        c.SetControlValue("data string", VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_UI1, lt.data(int(ms))))
+        self._run_checked(c, f"wiring the timeout of event structure {name!r}")
+
+    def event_selectors(self, target) -> list[list[str]]:
+        """Frame captions of each event structure (creation order), e.g. '"stop": Value Change'."""
+        h = self._helper(UIDS_VI)
+        h.SetControlValue("VI Refnum", target)
+        h.SetControlValue("Traverse Target", 1)
+        h.SetControlValue("Class Name", "EventStructure")
+        h.Run(False)
+        sel = self._helper(EVENTSEL_VI)
+        out = []
+        for _, r in sorted(zip(h.GetControlValue("UIDs") or (), h.GetControlValue("References") or ())):
+            sel.SetControlValue("reference", r)
+            self._run_checked(sel, "reading event selectors")
+            out.append([" ".join(str(x).split()) for x in sel.GetControlValue("selectors") or ()])
+        return out
 
     def _probe_vi(self):
         """A scratch VI kept in memory (never saved) for probing terminal names."""
@@ -1286,6 +1379,10 @@ UID_VI = VIS_DIR / "lvmcp_uid.vi"
 ALLPROPS_VI = VIS_DIR / "lvmcp_allprops.vi"
 SIGNAL_VI = VIS_DIR / "lvmcp_signal.vi"
 FIRE_VI = VIS_DIR / "lvmcp_fire.vi"
+TIMEOUTTERM_VI = VIS_DIR / "lvmcp_timeoutterm.vi"
+EVENTSEL_VI = VIS_DIR / "lvmcp_eventsel.vi"
+TERMCONST_VI = VIS_DIR / "lvmcp_termconst.vi"
+OUTCNT_VI = VIS_DIR / "lvmcp_outcnt.vi"
 _STD_TERMS = {"reference", "reference out", "error in (no error)", "error out"}
 _ANY_STYLE = 4294967295  # GObject.Replace "Style": -1 as U32, find the object by its palette name
 _REMOVE_CORE = Path("vi.lib") / "Utility" / "QuickDropSupport" / "Remove and Rewire Objects_core.vi"

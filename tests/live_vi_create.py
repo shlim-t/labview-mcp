@@ -279,6 +279,21 @@ UI_CASES = {
                   ["msg", "log"], ["done", "C.stop"], ["deq.queue out", "release.queue"]],
     }, {"STOP": 0, "Say hi": 1},
         ['[0] "STOP": Value Change', '[1] "Say hi": Value Change']),
+    # events of the VI itself and event data: the new value from the event data node, a Timeout
+    # frame that counts while idle, and Panel Close? discarded (the window cannot be closed)
+    "vi_events": ({
+        "controls": [{"name": "stop", "type": "bool", "label": "STOP", "style": "Stop Button"},
+                     {"name": "x", "type": "dbl"}],
+        "indicators": [{"name": "last", "type": "dbl"}, {"name": "ticks", "type": "i32"}],
+        "structures": [{"name": "W", "type": "while_loop", "structures": [{"name": "E", "type": "event", "events": [
+            {"control": "stop"},
+            {"control": "x", "data": "d"},
+            {"event": "Timeout", "timeout": 50, "functions": [{"name": "inc", "function": "Increment"}]},
+            {"event": "Panel Close?", "filter": "f", "constants": [{"name": "t", "type": "bool", "value": True}]}]}]}],
+        "wires": [["stop", "W.stop"], ["d.NewVal", "last"], ["W.i", "inc.x"], ["inc.x+1", "ticks"],
+                  ["t", "f.Discard?"]],
+    }, {"STOP": 0, "x": 1, "last": 1, "ticks": 2},
+        ['[0] "STOP": Value Change', '[1] "x": Value Change', '[2] Timeout', '[3] Panel Close?']),
 }
 
 
@@ -290,6 +305,9 @@ UI_RUNS = {
     # "log" sits outside the handler loop, so it shows the last message once the loop has ended
     "qmh": ([{"click": "Say hi"}, {"wait": 0.3}, {"click": "STOP"}],
             lambda r: r["values"]["log"] == "bye"),
+    # NewVal reaches "last"; the Timeout frame has run several times while waiting
+    "vi_events": ([{"set": {"x": 5}}, {"wait": 0.4}, {"read": ["last", "ticks"]}, {"click": "STOP"}],
+                  lambda r: r["actions"][2]["read"]["last"] == 5.0 and r["actions"][2]["read"]["ticks"] > 2),
 }
 
 

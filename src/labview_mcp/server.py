@@ -227,7 +227,13 @@ async def vi_create(
           {"control": "stop"},                                   # "event" defaults to "Value Change"
           {"control": "go", "event": "Value Change", "functions": [...], ...contents}]}
     "control" names a control/indicator of the spec. Other events: "Mouse Down", "Mouse Up",
-    "Mouse Enter", "Mouse Leave", "Key Down", ... Code in a frame may be wired to code in the same
+    "Mouse Enter", "Mouse Leave", "Key Down", ... Events of the VI itself have no "control":
+      {"event": "Timeout", "timeout": 100, ...contents}     # runs when no event came for 100 ms
+      {"event": "Panel Close?", "filter": "f", ...}         # wire a True constant to "f.Discard?"
+      (also "Panel Close", "Panel Resize", "Key Down", "Mouse Enter", ...).
+    Event data: "data": "d" names the frame's event data node; wire "d.NewVal", "d.OldVal",
+    "d.Coords", "d.Button", "d.CtlRef", ... (the node shows the items that are wired).
+    Code in a frame may be wired to code in the same
     frame and to objects outside the event structure (not to shift registers). A front-panel terminal
     used by only one frame is placed in it (read when the event happens), and [button, "W.stop"]
     reads the button in its own frame and stops the loop W, as in NI's templates. Example:

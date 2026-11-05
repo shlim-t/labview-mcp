@@ -4,7 +4,7 @@ An [MCP](https://modelcontextprotocol.io) server that lets AI coding agents — 
 
 LabVIEW source code is a binary, graphical format. Text-based coding agents can't open a `.vi` file. labview-mcp acts as the agent's eyes and hands: it drives your installed LabVIEW over its ActiveX server and returns what the agent needs as text, images, and values.
 
-> Status: **v0.14.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth, and **user interfaces**: front-panel styles (buttons, LEDs, knobs, gauges, charts), event structures, and Property and Invoke Nodes. Any existing VI can be read as a graph (`vi_dump`) and changed in place (`vi_edit`: remove, replace, and add code, including inside existing loops and case frames). **Projects and builds**: the agent can put VIs in a project, add application (EXE), packed-library, and source-distribution build specs, build them, and mass compile folders.
+> Status: **v0.15.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth, and **user interfaces**: front-panel styles (buttons, LEDs, knobs, gauges, charts), event structures (control and VI events, Timeout, event data), and Property and Invoke Nodes. Any existing VI can be read as a graph (`vi_dump`) and changed in place (`vi_edit`: remove, replace, and add code, including inside existing loops and case frames). **Projects and builds**: the agent can put VIs in a project, add application (EXE), packed-library, and source-distribution build specs, build them, and mass compile folders.
 
 ## What the agent can do
 
@@ -186,7 +186,25 @@ To test a UI, give `vi_run` the steps a user would take:
 
 The result lists each step. Here it reads `y = 42` and then the VI stops by itself.
 
-`"event"` defaults to `"Value Change"`. Other control events include `"Mouse Down"`, `"Mouse Up"`, `"Mouse Enter"`, `"Mouse Leave"`, and `"Key Down"`. Code in a frame can be wired to its own frame and to anything outside the event structure, except shift registers. Event structures are made by `vi_create` only, for now. 
+`"event"` defaults to `"Value Change"`. Other control events include `"Mouse Down"`, `"Mouse Up"`, `"Mouse Enter"`, `"Mouse Leave"`, and `"Key Down"`. Code in a frame can be wired to its own frame and to anything outside the event structure, except shift registers. Event structures are made by `vi_create` only, for now.
+
+Events of the VI itself have no `"control"`, and frames can use their event data:
+
+```json
+{"name": "E", "type": "event", "events": [
+  {"control": "stop"},
+  {"control": "x", "data": "d"},
+  {"event": "Timeout", "timeout": 50, "functions": [{"name": "inc", "function": "Increment"}]},
+  {"event": "Panel Close?", "filter": "f", "constants": [{"name": "t", "type": "bool", "value": true}]}]}
+```
+
+with wires `["d.NewVal", "last"]`, `["W.i", "inc.x"]`, `["inc.x+1", "ticks"]`, `["t", "f.Discard?"]`.
+
+- `"data"` names the frame's event data node. Wire its items by name, such as `NewVal`, `OldVal`, `CtlRef`, `Coords`, and `Button`. The node shows the items that are wired.
+- `"Timeout"` runs when no other event arrives within `"timeout"` milliseconds. The constant is wired to the structure's hourglass terminal.
+- Filter events end in `?`. `"filter"` names their filter node, such as `Discard?` for `"Panel Close?"`, which keeps the window open.
+- Other VI events: `"Panel Close"`, `"Panel Resize"`, `"Key Down"`, `"Mouse Enter"`, and more.
+
 
 ### Property and Invoke Nodes
 
@@ -285,7 +303,8 @@ agent ──MCP/stdio──▶ labview-mcp ──ActiveX (COM)──▶ LabVIEW.
 - [x] `lv_class_properties`: a class's properties by name. Methods are not listed yet.
 - [x] Enums, enum cases, and state machines.
 - [x] Queues: producer/consumer and queued message handlers.
-- [ ] Event structures: Timeout, panel events (Panel Close?), event data (NewVal), editing with `vi_edit`.
+- [x] Event structures: Timeout, VI events (Panel Close?), event data (NewVal, Coords) and filter nodes (Discard?).
+- [ ] Event structures: editing with `vi_edit`; dynamic (user) events.
 - [x] `vi_run` operates a running VI's front panel: click, set, read.
 - [x] Helper VIs saved for LabVIEW 2015 and later.
 - [ ] Verified on LabVIEW versions older than 2026 and on localized (non-English) LabVIEW.
