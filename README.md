@@ -4,7 +4,7 @@ An [MCP](https://modelcontextprotocol.io) server that lets AI coding agents — 
 
 LabVIEW source code is a binary, graphical format. Text-based coding agents can't open a `.vi` file. labview-mcp acts as the agent's eyes and hands: it drives your installed LabVIEW over its ActiveX server and returns what the agent needs as text, images, and values.
 
-> Status: **v0.9.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth, and **user interfaces**: front-panel styles (buttons, LEDs, knobs, gauges, charts), event structures, and Property and Invoke Nodes. Any existing VI can be read as a graph (`vi_dump`) and changed in place (`vi_edit`: remove, replace, and add code, including inside existing loops and case frames).
+> Status: **v0.10.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth, and **user interfaces**: front-panel styles (buttons, LEDs, knobs, gauges, charts), event structures, and Property and Invoke Nodes. Any existing VI can be read as a graph (`vi_dump`) and changed in place (`vi_edit`: remove, replace, and add code, including inside existing loops and case frames).
 
 ## What the agent can do
 
@@ -19,6 +19,7 @@ LabVIEW source code is a binary, graphical format. Text-based coding agents can'
 | `vi_dump` | **The block diagram as a JSON graph**: every node (functions by palette name, constants with their values, subVIs, loops, case frames, tunnels, shift registers, property nodes) and every wire with its source and sinks. Works on any VI, including broken ones. |
 | `vi_edit` | **Changes an existing VI in place.** It removes nodes, adds code, and wires to existing controls, nodes, loops, and case frames (by `vi_dump` id). The rest of the diagram keeps its layout. It backs up the VI first, and reverts instead of saving if the result is broken or a wire could not be made. |
 | `lv_functions` | Searches the palette functions in your LabVIEW install by name. |
+| `lv_class_properties` | The properties of a VI Server class, such as Boolean, WaveformChart, or VI, **as LabVIEW itself lists them**. You can filter them by a word. Use the names in Property Nodes. |
 | `function_terminals` | Exact terminal names of a function, **verified against LabVIEW's scripting engine** so the agent wires them right the first time. |
 | `vi_create` | **Builds a new VI** from a JSON spec: typed controls and indicators with defaults and front-panel styles, constants, palette functions, subVI calls, For/While loops, shift registers, case structures, event structures, and wires. LabVIEW's Clean Up Diagram tidies the result, and the tool returns pictures of it. |
 
@@ -152,7 +153,7 @@ The result follows NI's event-handler pattern:
 - **Unlinked:** `"class"` makes an unlinked node. Wire a reference to `"p.reference"`; Application needs none.
 - **Read or write:** properties are read unless `"write"` is `true` or lists them.
 - **Wiring:** wire nodes as `"p.Visible"`, `"i.<parameter>"`, `"p.error in"`, and `"p.error out"`. Chain the error wires to set the order of nodes.
-- **Names:** use LabVIEW's short names, such as `Visible`, `Value`, `DefVal`, `Disabled`, and `App.Version`.
+- **Names:** use LabVIEW's short names, such as `Visible`, `Value`, `DefVal`, `Disabled`, and `App.Version`. `lv_class_properties` lists them for a class. If LabVIEW names a property's terminal differently, the wire is redirected to the right terminal.
 - **Placement:** nodes work at the top level, in loops and cases, inside event frames, and in `vi_edit`.
 
 Strings are stored in the Windows ANSI code page, as LabVIEW does, so characters outside it (for example `é` on Korean Windows) become the closest match.
@@ -214,7 +215,7 @@ agent ──MCP/stdio──▶ labview-mcp ──ActiveX (COM)──▶ LabVIEW.
 - [x] `vi_create`: connector pane and error clusters, so generated VIs can call each other.
 - [x] `vi_create`: front-panel styles and event structures (control events) for user interfaces.
 - [x] Property and Invoke Nodes, linked to controls or of any VI Server class.
-- [ ] A tool that lists a class's properties and methods by short name.
+- [x] `lv_class_properties`: a class's properties by name. Methods are not listed yet.
 - [ ] Event structures: Timeout, panel events (Panel Close?), event data (NewVal), editing with `vi_edit`; enums; clicking buttons from `vi_run`.
 - [x] Helper VIs saved for LabVIEW 2015 and later.
 - [ ] Verified on LabVIEW versions older than 2026 and on localized (non-English) LabVIEW.

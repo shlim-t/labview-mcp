@@ -153,6 +153,14 @@ CASES = {
         "property_nodes": [{"name": "r", "control": "x", "properties": ["Value"]}],
         "wires": [["i.error out", "r.error in"], ["r.Value", "after"]],
     }, {"x": 9}, {"after": 5.0}),
+    # several properties on one node, one of them an enum ("Disabled": 0 = enabled)
+    "prop_multi": ({
+        "controls": [{"name": "x", "type": "dbl"}],
+        "indicators": [{"name": "dis", "type": "i32", "label": "disabled"},
+                       {"name": "vis", "type": "bool", "label": "visible"}],
+        "property_nodes": [{"name": "r", "control": "x", "properties": ["Disabled", "Visible"]}],
+        "wires": [["r.Disabled", "dis"], ["r.Visible", "vis"]],
+    }, {}, {"disabled": 0, "visible": True}),
     # an unlinked Property Node of class Application needs no reference
     "app_version": ({
         "indicators": [{"name": "ver", "type": "string", "label": "version"}],

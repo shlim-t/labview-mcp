@@ -311,6 +311,16 @@ async def lv_functions(query: str) -> dict:
 
 
 @mcp.tool()
+async def lv_class_properties(class_name: str, query: str = "") -> dict:
+    """Properties of a VI Server class as LabVIEW lists them (All Supported Properties), filtered by
+    `query` (words in the name or long name, e.g. "visible", "plot color"). Use "name" in a property
+    node's "properties" in vi_create / vi_edit. class_name is a class like "Boolean", "Digital",
+    "WaveformChart", "Control", "VI", "Application"; a node linked to a front-panel object has that
+    object's class (vi_dump / vi_text show the control type; its parent classes also apply)."""
+    return await _run(lv.class_properties, class_name, query)
+
+
+@mcp.tool()
 async def function_terminals(name: str, size: int | None = None) -> dict:
     """Exact terminal names of one palette function, verified against LabVIEW's scripting engine
     (Context Help labels sometimes differ, e.g. "Variant" vs "variant"). Wire them in vi_create

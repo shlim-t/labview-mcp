@@ -11,6 +11,7 @@ text would run them through the Windows code page and corrupt bytes >= 0x80.
 """
 from __future__ import annotations
 
+import json
 import re
 import struct
 from pathlib import Path
@@ -26,6 +27,11 @@ except ImportError:  # pragma: no cover
 
 class SpecError(_Base):
     pass
+
+
+# VI Server class name -> class number in refnum type descriptors (measured on LabVIEW 2026)
+VI_CLASSES: dict[str, int] = json.loads(
+    (Path(__file__).with_name("vi_classes.json")).read_text(encoding="utf-8"))["classes"]
 
 
 # ---- types ------------------------------------------------------------------
@@ -252,6 +258,10 @@ def _check_node(pn: dict, kind: str, b) -> None:
     for k in ("control", "class", "method"):
         if pn.get(k) is not None and (not isinstance(pn[k], str) or _TERM_BAD.search(pn[k])):
             raise SpecError(f"{name!r}: bad {k} {pn[k]!r}")
+    if pn.get("class") and pn["class"] not in VI_CLASSES:
+        import difflib
+        near = difflib.get_close_matches(pn["class"], list(VI_CLASSES), 6, 0.5)
+        raise SpecError(f"{name!r}: no VI Server class {pn['class']!r}. Close: {near}")
     if kind == "pnode":
         props = pn.get("properties")
         if not isinstance(props, list) or not props or not all(isinstance(x, str) and x for x in props):

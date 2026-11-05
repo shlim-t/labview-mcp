@@ -11,7 +11,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 EXPECTED = {"lv_status", "vi_info", "vi_text", "vi_snapshot", "vi_hierarchy", "vi_run", "vi_dump", "vi_edit",
-            "vi_create", "lv_functions", "function_terminals"}
+            "vi_create", "lv_functions", "function_terminals", "lv_class_properties"}
 
 
 async def main() -> int:
@@ -24,6 +24,10 @@ async def main() -> int:
             print("tools:", sorted(names))
             if missing:
                 print("MISSING", missing)
+                return 1
+            r = await s.call_tool("lv_class_properties", {"class_name": "Boolean", "query": "visible"})
+            print("lv_class_properties:", "error" if r.is_error else " ".join(r.content[0].text[:120].split()))
+            if r.is_error:
                 return 1
             r = await s.call_tool("function_terminals", {"name": "Add"})
             print("function_terminals:", r.content[0].text[:120])

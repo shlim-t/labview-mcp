@@ -387,9 +387,12 @@ class LabVIEW:
     def _finish_nodes(self, target, script, outs: list, ins: list, labels: dict, run_late) -> None:
         """Give the Property/Invoke Nodes a script made their class and properties or method, link them
         to their front-panel control, switch Write items, then draw the wires to them (run_late)."""
+        from . import gen
         if not script.pnodes and script.late is None:
             return
         fp = None
+        node_terms: dict[str, list] = {}
+        rename: dict[str, str] = {}
         for pn in script.pnodes:
             ref = outs[pn["out"]]
             what = f"{'property' if pn['kind'] == 'pnode' else 'invoke'} node {pn['name']!r}"
@@ -421,20 +424,38 @@ class LabVIEW:
                 link.SetControlValue("reference", ref)
                 link.SetControlValue("control", fp[label])
                 self._run_checked(link, f"linking {what} to {label!r}")
+            uid = self._uid_of(ref)
             if pn["write"]:
-                items = sorted(self._owned(target, "PropertyItem", self._uid_of(ref)))
+                items = sorted(self._owned(target, "PropertyItem", uid))
                 w = self._helper(PROPWRITE_VI)
                 for k in pn["write"]:
                     w.SetControlValue("item", items[k][1])
                     w.SetControlValue("write", True)
                     self._run_checked(w, f"making {pn['items'][k]!r} of {what} writable")
+            # A terminal is named by LabVIEW, not always as the property was asked for (the item
+            # "AllProps[]" has the terminal "AllProps2"); item terminals follow the item order.
+            terms = [n for _, n in sorted(self._owned(target, "Terminal", uid, names=True))]
+            node_terms[pn["name"]] = terms
+            item_terms = [n for n in terms if n not in _STD_TERMS]
+            if pn["kind"] == "pnode" and len(item_terms) == len(pn["items"]):
+                for asked, real in zip(pn["items"], item_terms):
+                    if asked != real:
+                        rename[f"\"{pn['name']}.{asked}\""] = f"\"{pn['name']}.{real}\""
         if script.late is not None:
             refs = [outs[k] if src == "out" else ins[k] for src, k in script.late_refs]
-            st, code, msg = run_late(script.late, refs)
+            late = script.late
+            if rename:
+                xml = late.xml
+                for a, b in rename.items():
+                    xml = xml.replace(a, b)
+                late = gen.Script(**{**late.__dict__, "xml": xml})
+            st, code, msg = run_late(late, refs)
             if st:
-                hint = (" A property's or parameter's terminal name may differ from the name shown in "
-                        "LabVIEW; LabVIEW names terminals by their short name (\"Visible\", \"Value\", "
-                        "\"PaletteString\")." if code == 1063 else "")
+                hint = ""
+                if code == 1063:
+                    hint = (" A wire names a terminal the node does not have. Terminals: "
+                            + "; ".join(f"{n}: {[t for t in ts if t != 'error in (no error)'] + ['error in']}"
+                                        for n, ts in node_terms.items()) + ".")
                 raise LabVIEWError(f"wiring the Property/Invoke Nodes failed (error {code}).{hint} "
                                    f"{_strip_html(str(msg))}")
 
@@ -457,15 +478,51 @@ class LabVIEW:
                 return str(c)
         return "Control"
 
-    def _owned(self, target, cls: str, owner: int) -> list:
-        """(uid, refnum) of the objects of a class whose owner has UID `owner`."""
+    def _owned(self, target, cls: str, owner: int, names: bool = False) -> list:
+        """(uid, refnum) — or (uid, name) — of the objects of a class whose owner has UID `owner`."""
         h = self._helper(UIDS_VI)
         h.SetControlValue("VI Refnum", target)
         h.SetControlValue("Traverse Target", 1)
         h.SetControlValue("Class Name", cls)
         h.Run(False)
+        col = h.GetControlValue("Names" if names else "References") or ()
         return [(u, r) for u, o, r in zip(h.GetControlValue("UIDs") or (), h.GetControlValue("Owner UIDs") or (),
-                                          h.GetControlValue("References") or ()) if o == owner]
+                                          col) if o == owner]
+
+    def class_properties(self, cls: str, query: str = "") -> dict:
+        """Properties of a VI Server class, from LabVIEW itself (All Supported Properties)."""
+        from . import gen
+        cache = self.__dict__.setdefault("_props_cache", {})
+        if cls not in cache:
+            vi = self._probe_vi()
+            self._probe_n += 1
+            st, code, _ = self._gen_script(
+                vi, f"<Script><Function name=\"pp{self._probe_n}\" style=\"Property Node\" position=\"(0,0)\" "
+                    "out=\"0\"></Function></Script>", [], [], raw=True)
+            if st:
+                raise LabVIEWError(f"could not place a Property Node (error {code})")
+            ref = self._gen_out[0]
+            c = self._helper(PROPCONFIG_VI)
+            c.SetControlValue("reference", ref)
+            c.SetControlValue("Property Node Class Name", "VI Server:" + cls)
+            c.SetControlValue("ID Strings[]", [])
+            c.SetControlValue("Allow Alternate Names? (F)", True)
+            c.Run(False)
+            st, code, _ = c.GetControlValue("error out")
+            if st:
+                raise LabVIEWError(_node_error(f"class {cls!r}", {"class": cls, "kind": "pnode", "items": []}, code)
+                                   + f" Classes: {sorted(gen.VI_CLASSES)}")
+            h = self._helper(ALLPROPS_VI)
+            h.SetControlValue("reference", ref)
+            self._run_checked(h, f"listing the properties of {cls}")
+            cache[cls] = [{"name": short, "long_name": long_, "data_name": data}
+                          for _, data, short, long_ in h.GetControlValue("properties") or ()]
+        props = cache[cls]
+        if query:
+            q = query.lower()
+            props = [p for p in props if q in (p["name"] + " " + p["long_name"]).lower()]
+        return {"class": cls, "count": len(props), "properties": props,
+                "use": "put \"name\" in a property node's \"properties\" and wire it as \"node.<name>\""}
 
     def _run_checked(self, h, what: str) -> None:
         h.Run(False)
@@ -1136,6 +1193,8 @@ PROPWRITE_VI = VIS_DIR / "lvmcp_propwrite.vi"
 PROPLINK_VI = VIS_DIR / "lvmcp_proplink.vi"
 INVOKELINK_VI = VIS_DIR / "lvmcp_invokelink.vi"
 UID_VI = VIS_DIR / "lvmcp_uid.vi"
+ALLPROPS_VI = VIS_DIR / "lvmcp_allprops.vi"
+_STD_TERMS = {"reference", "reference out", "error in (no error)", "error out"}
 _ANY_STYLE = 4294967295  # GObject.Replace "Style": -1 as U32, find the object by its palette name
 _REMOVE_CORE = Path("vi.lib") / "Utility" / "QuickDropSupport" / "Remove and Rewire Objects_core.vi"
 # vi_dump node kinds that vi_edit can bind or remove -> gen kinds
@@ -1160,9 +1219,8 @@ def _node_error(what: str, pn: dict, code: int) -> str:
     if code == 1077:
         names = pn["items"] if pn["kind"] == "pnode" else [pn["method"]]
         return (f"{what}: class {pn['class'] or 'Control'} has no {'property' if pn['kind'] == 'pnode' else 'method'} "
-                f"named {names}. Use LabVIEW's short names, e.g. \"Visible\", \"Value\", \"Disabled\", "
-                "\"App.Version\". A node linked to a control is first set to class Control, so give "
-                "properties every control has, or use \"class\" and wire a reference.")
+                f"named {names}. lv_class_properties({pn['class'] or 'Control'!r}) lists its properties; "
+                "sub-properties such as \"Label.Text\" are not listed but may work by their short name.")
     return f"configuring {what} failed (error {code})"
 
 

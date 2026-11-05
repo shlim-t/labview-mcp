@@ -48,8 +48,16 @@ def _type(t) -> tuple[bytes, bytes]:
             body = bytes.fromhex("0040" "0001" "ffffffff") + elem
             return (len(body) + 2).to_bytes(2, "big") + body, bytes(4)
         return refnum_td(t[4:]), bytes(4)
-    lt = gen.parse_type(t)
+    lt = t if isinstance(t, gen.LVType) else gen.parse_type(t)
     return lt.td(), lt.data(None)
+
+
+
+
+# what All Supported Properties returns: one cluster per property
+_ID_NAMES = gen.LVType("array", dims=1, elem=gen.parse_type({"cluster": [
+    {"name": "ID", "type": "string"}, {"name": "Data Name", "type": "string"},
+    {"name": "Short Name", "type": "string"}, {"name": "Long Name", "type": "string"}]}))
 
 
 def _write_mode_node(lv: LabVIEW, t, tmp: Path):
@@ -143,6 +151,8 @@ def build_helper(lv: LabVIEW, path: Path, spec: dict) -> dict:
     xml += [f"<Control name=\"c{k}\" in=\"{len(nodes) + k}\"></Control>" for k in range(len(fps))]
     # LabVIEW's scripting draws a wire from its sink: source = sink, destination = driver
     # Method return values cannot be wired this way (the name resolves to the wrong terminal).
+    # Terminal names are the ones LabVIEW gives the terminal objects ("AllProps2" for the item
+    # AllProps[]); node_terminals() lists them. "[...]" in a name would mean a position.
     xml += [f"<Wire source={quoteattr(end(b))} destination={quoteattr(end(a))}></Wire>" for a, b in spec["wires"]]
     xml.append("</Script>")
     st, code, src = lv._gen_script(t, "".join(xml), [], [], refs=refs + [fp[lab] for lab, _, _ in fps])
@@ -151,6 +161,7 @@ def build_helper(lv: LabVIEW, path: Path, spec: dict) -> dict:
         raise LabVIEWError(f"wiring failed (error {code}): {src}")
     t.SaveInstrument(str(path), False, False)
     return {"path": str(path)}
+
 
 
 HELPERS: dict[str, dict] = {
@@ -178,6 +189,13 @@ HELPERS: dict[str, dict] = {
         "indicators": [("class name", "string"), ("error out", "error")],
         "nodes": [{"name": "c", "kind": "property", "class": "Property", "items": ["PropClassName"]}],
         "wires": [("reference", "c.reference"), ("c.ClassName", "class name"), ("c.error out", "error out")],
+    },
+    # Property.All Supported Properties: the properties of the class a Property Node has
+    "lvmcp_allprops": {
+        "controls": [("reference", "ref:Property")],
+        "indicators": [("properties", _ID_NAMES), ("error out", "error")],
+        "nodes": [{"name": "a", "kind": "property", "class": "Property", "items": ["AllProps[]"]}],
+        "wires": [("reference", "a.reference"), ("a.AllProps2", "properties"), ("a.error out", "error out")],
     },
     # Property.Link To Control: make a Property Node an implicit one of a front-panel control
     "lvmcp_proplink": {
@@ -210,7 +228,8 @@ HELPERS: dict[str, dict] = {
 }
 # Generated in this order: lvmcp_propwrite needs lvmcp_move. lvmcp_replace is still the hand-built one
 # in vis_src (this spec reproduces it; see tests).
-ORDER = ["lvmcp_move", "lvmcp_propwrite", "lvmcp_proplink", "lvmcp_invokelink", "lvmcp_uid", "lvmcp_classname"]
+ORDER = ["lvmcp_move", "lvmcp_propwrite", "lvmcp_proplink", "lvmcp_invokelink", "lvmcp_uid", "lvmcp_classname",
+         "lvmcp_allprops"]
 
 
 def main(args: list[str]) -> None:
