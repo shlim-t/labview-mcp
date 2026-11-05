@@ -216,6 +216,15 @@ async def vi_create(
            "function": "Multiply"}], "constants": [{"name": "k", "type": "dbl", "value": 2}]}]}]}],
        "wires": [["stop", "W.stop"], ["x", "m.x"], ["k", "m.y"], ["m.x*y", "y"]]}
     vi_run cannot press buttons, so a UI VI runs until vi_run's time limit stops it.
+    Property and Invoke Nodes (top level, in loops, cases and event frames):
+      "property_nodes": [{"name": "p", "control": "chart", "properties": ["Visible"], "write": true},
+                         {"name": "a", "class": "Application", "properties": ["App.Version"]}],
+      "invoke_nodes":   [{"name": "i", "control": "x", "method": "Reinit To Dflt"}]
+    "control" links the node to a front-panel object (it gets that object's class); "class" makes
+    an unlinked node (wire a reference into "p.reference"; Application needs none). Properties are
+    read unless "write" is true or lists them. Wire "p.Visible", "i.<parameter>", "p.error in",
+    "p.error out"; chain error wires to order nodes. Names are LabVIEW's short names ("Visible",
+    "Value", "DefVal", "Disabled", "App.Version", method "Reinit To Dflt").
     The diagram is tidied with LabVIEW's Clean Up Diagram."""
     res = await _run(lv.vi_create, path, spec, overwrite, description)
     ui = bool(res.get("event_frames") or res.get("styled"))

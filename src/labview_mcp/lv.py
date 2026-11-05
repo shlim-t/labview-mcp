@@ -306,7 +306,8 @@ class LabVIEW:
             raise LabVIEWError(f"a different VI named {p.name} is already in LabVIEW's memory "
                                f"({target.Path}); pick another file name")
         target._FlagAsMethod("SaveInstrument")
-        later = bool(script.events or script.styles)  # tidy the diagram once everything is in place
+        # tidy the diagram once everything is in place
+        later = bool(script.events or script.styles or script.has_nodes())
         status, code, source = self._gen_script(target, script.xml, script.type_strings, script.data_strings,
                                                 raw=later)
         if status:
@@ -315,11 +316,15 @@ class LabVIEW:
                 f"LabVIEW rejected the diagram (error {code}){': ' + hint if hint else ''}. "
                 f"The file {p} was left as an empty VI.\nLabVIEW said: {_strip_html(str(source))}")
         try:
+            out_refs = list(self._gen_out)
+            if len(out_refs) != len(script.outs):
+                raise LabVIEWError("LabVIEW did not return the references of the new objects")
+            labels = script.labels
+            self._finish_nodes(target, script, out_refs, [], labels,
+                               lambda s, refs: self._gen_script(target, s.xml, s.type_strings, s.data_strings,
+                                                                refs=refs, raw=True))
             if script.events:
-                outs = dict(zip(script.outs, self._gen_out))
-                if len(outs) != len(script.outs):
-                    raise LabVIEWError("LabVIEW did not return the references of the new objects")
-                self._build_events(target, script.events, outs)
+                self._build_events(target, script.events, dict(zip(script.outs, out_refs)), labels)
             if script.styles:
                 self._apply_styles(target, script.styles)
             if later:
@@ -379,6 +384,89 @@ class LabVIEW:
             if refs:
                 _try(lambda: boot.SetControlValue("Obj Refs In[]", []))
 
+    def _finish_nodes(self, target, script, outs: list, ins: list, labels: dict, run_late) -> None:
+        """Give the Property/Invoke Nodes a script made their class and properties or method, link them
+        to their front-panel control, switch Write items, then draw the wires to them (run_late)."""
+        if not script.pnodes and script.late is None:
+            return
+        fp = None
+        for pn in script.pnodes:
+            ref = outs[pn["out"]]
+            what = f"{'property' if pn['kind'] == 'pnode' else 'invoke'} node {pn['name']!r}"
+            if pn["control"]:
+                fp = fp if fp is not None else self._fp_refs_by_label(target)
+                label = labels.get(pn["control"], pn["control"])
+                if label not in fp:
+                    raise LabVIEWError(f"{what}: no front-panel object {label!r}")
+                # the control's own class, so its own properties (e.g. a chart's) are available
+                pn = dict(pn, **{"class": self._control_class(target, fp[label])})
+            cls = "VI Server:" + pn["class"]
+            if pn["kind"] == "pnode":
+                h = self._helper(PROPCONFIG_VI)
+                h.SetControlValue("reference", ref)
+                h.SetControlValue("Property Node Class Name", cls)
+                h.SetControlValue("ID Strings[]", list(pn["items"]))
+            else:
+                h = self._helper(INVOKECONFIG_VI)
+                h.SetControlValue("reference", ref)
+                h.SetControlValue("Invoke Node Class Name", cls)
+                h.SetControlValue("ID String", pn["method"])
+            h.SetControlValue("Allow Alternate Names? (F)", True)
+            h.Run(False)
+            st, code, src = h.GetControlValue("error out")
+            if st:
+                raise LabVIEWError(_node_error(what, pn, code))
+            if pn["control"]:
+                link = self._helper(PROPLINK_VI if pn["kind"] == "pnode" else INVOKELINK_VI)
+                link.SetControlValue("reference", ref)
+                link.SetControlValue("control", fp[label])
+                self._run_checked(link, f"linking {what} to {label!r}")
+            if pn["write"]:
+                items = sorted(self._owned(target, "PropertyItem", self._uid_of(ref)))
+                w = self._helper(PROPWRITE_VI)
+                for k in pn["write"]:
+                    w.SetControlValue("item", items[k][1])
+                    w.SetControlValue("write", True)
+                    self._run_checked(w, f"making {pn['items'][k]!r} of {what} writable")
+        if script.late is not None:
+            refs = [outs[k] if src == "out" else ins[k] for src, k in script.late_refs]
+            st, code, msg = run_late(script.late, refs)
+            if st:
+                hint = (" A property's or parameter's terminal name may differ from the name shown in "
+                        "LabVIEW; LabVIEW names terminals by their short name (\"Visible\", \"Value\", "
+                        "\"PaletteString\")." if code == 1063 else "")
+                raise LabVIEWError(f"wiring the Property/Invoke Nodes failed (error {code}).{hint} "
+                                   f"{_strip_html(str(msg))}")
+
+    def _uid_of(self, ref) -> int:
+        u = self._helper(UID_VI)
+        u.SetControlValue("reference", ref)
+        self._run_checked(u, "reading an object's UID")
+        return u.GetControlValue("UID")
+
+    def _control_class(self, target, ref) -> str:
+        """VI Server class name of a front-panel object, e.g. "WaveformChart"."""
+        uid = self._uid_of(ref)
+        h = self._helper(UIDS_VI)
+        h.SetControlValue("VI Refnum", target)
+        h.SetControlValue("Traverse Target", 0)  # front panel
+        h.SetControlValue("Class Name", "Control")
+        h.Run(False)
+        for u, c in zip(h.GetControlValue("UIDs") or (), h.GetControlValue("Classes") or ()):
+            if u == uid:
+                return str(c)
+        return "Control"
+
+    def _owned(self, target, cls: str, owner: int) -> list:
+        """(uid, refnum) of the objects of a class whose owner has UID `owner`."""
+        h = self._helper(UIDS_VI)
+        h.SetControlValue("VI Refnum", target)
+        h.SetControlValue("Traverse Target", 1)
+        h.SetControlValue("Class Name", cls)
+        h.Run(False)
+        return [(u, r) for u, o, r in zip(h.GetControlValue("UIDs") or (), h.GetControlValue("Owner UIDs") or (),
+                                          h.GetControlValue("References") or ()) if o == owner]
+
     def _run_checked(self, h, what: str) -> None:
         h.Run(False)
         status, code, source = h.GetControlValue("error out")
@@ -418,7 +506,7 @@ class LabVIEW:
                           h.GetControlValue("References") or ()))
         return [[r for _, o, r in rows if o == ev] for ev in evs]
 
-    def _build_events(self, target, events: list, outs: dict) -> None:
+    def _build_events(self, target, events: list, outs: dict, labels: dict) -> None:
         """Give each new event structure its frames: register the events, then generate each frame's
         code on the frame's own diagram."""
         from win32com.client import VARIANT
@@ -456,15 +544,20 @@ class LabVIEW:
                 if fr["script"] is not None:
                     s = fr["script"]
                     passes.append((s.xml, s.type_strings, s.data_strings, [outs[n] for n in fr["bind"]]))
-                for xml, ts, ds, refs in passes:
+
+                def on_frame(xml, ts, ds, refs, j=j, i=i):
                     # the helper closes the diagram reference it is given, so look it up each time
-                    diag = self._event_frame_diagrams(target)[j][i]
-                    status, code, source = self._gen_on_diagram(diag, xml, ts, ds, refs)
+                    return self._gen_on_diagram(self._event_frame_diagrams(target)[j][i], xml, ts, ds, refs)
+                for xml, ts, ds, refs in passes:
+                    status, code, source = on_frame(xml, ts, ds, refs)
                     if status:
                         hint = _GEN_ERRORS.get(code, "")
                         raise LabVIEWError(
                             f"LabVIEW rejected the code of event frame {i} of {ev['name']!r} (error {code})"
                             f"{': ' + hint if hint else ''}. {_strip_html(str(source))}")
+                if fr["script"] is not None:
+                    self._finish_nodes(target, fr["script"], list(self._gen_out), passes[-1][3], labels,
+                                       lambda s, refs, f=on_frame: f(s.xml, s.type_strings, s.data_strings, refs))
 
     def _probe_vi(self):
         """A scratch VI kept in memory (never saved) for probing terminal names."""
@@ -745,14 +838,25 @@ class LabVIEW:
             status, code, source = self._gen_script(target, script.xml, script.type_strings,
                                                     script.data_strings, refs=refs, raw=True)
         ref_of = {b[0]: r for b, r in zip(bindings, refs)}
-        if not status and frame_scripts:
-            diags = self._uid_map(target, "Diagram", fresh=True)
-            for cuid, k, used, sub in frame_scripts:
-                status, code, source = self._gen_on_diagram(
-                    diags[diagram_uid[f"{cuid}#{k}"]], sub.xml, sub.type_strings, sub.data_strings,
-                    refs=[ref_of[n] for n in used])
-                if status:
-                    break
+        try:
+            if not status:
+                self._finish_nodes(target, script, list(self._gen_out), refs, {},
+                                   lambda s, r: self._gen_script(target, s.xml, s.type_strings, s.data_strings,
+                                                                 refs=r, raw=True))
+            if not status and frame_scripts:
+                for cuid, k, used, sub in frame_scripts:
+                    def on_frame(s, r, key=f"{cuid}#{k}"):
+                        # the helper closes the diagram reference it is given, so look it up each time
+                        diag = self._uid_map(target, "Diagram", fresh=True)[diagram_uid[key]]
+                        return self._gen_on_diagram(diag, s.xml, s.type_strings, s.data_strings, refs=r)
+                    frame_refs = [ref_of[n] for n in used]
+                    status, code, source = on_frame(sub, frame_refs)
+                    if status:
+                        break
+                    self._finish_nodes(target, sub, list(self._gen_out), frame_refs, {}, on_frame)
+        except LabVIEWError as e:
+            _try(lambda: target.Revert())
+            raise LabVIEWError(f"{e} The VI was reverted and not saved.") from None
         if status:
             _try(lambda: target.Revert())
             hint = _GEN_ERRORS.get(code, "")
@@ -828,6 +932,7 @@ class LabVIEW:
         h.SetControlValue("Obj Refs In[]", list(refs))
         try:
             h.Run(False)
+            self._gen_out = list(_try(lambda: h.GetControlValue("Obj Refs Out[]"), ()) or ())
             return h.GetControlValue("error out")
         finally:
             if refs:
@@ -1024,6 +1129,13 @@ DIAG_GEN_VI = VIS_DIR / "lvmcp_gen_script_diag.vi"
 REPLACE_VI = VIS_DIR / "lvmcp_replace.vi"
 ADDFRAME_VI = VIS_DIR / "lvmcp_addframe.vi"
 EVENTS_VI = VIS_DIR / "lvmcp_events.vi"
+PROPCONFIG_VI = VIS_DIR / "lvmcp_propconfig.vi"
+INVOKECONFIG_VI = VIS_DIR / "lvmcp_invokeconfig.vi"
+# generated by tools/helpergen.py
+PROPWRITE_VI = VIS_DIR / "lvmcp_propwrite.vi"
+PROPLINK_VI = VIS_DIR / "lvmcp_proplink.vi"
+INVOKELINK_VI = VIS_DIR / "lvmcp_invokelink.vi"
+UID_VI = VIS_DIR / "lvmcp_uid.vi"
 _ANY_STYLE = 4294967295  # GObject.Replace "Style": -1 as U32, find the object by its palette name
 _REMOVE_CORE = Path("vi.lib") / "Utility" / "QuickDropSupport" / "Remove and Rewire Objects_core.vi"
 # vi_dump node kinds that vi_edit can bind or remove -> gen kinds
@@ -1040,6 +1152,21 @@ _GEN_ERRORS = {
 
 
 # ---- helpers --------------------------------------------------------------
+def _node_error(what: str, pn: dict, code: int) -> str:
+    if code == 1311:
+        return (f"{what}: LabVIEW has no VI Server class {pn['class']!r}. Use a class name as in "
+                "LabVIEW's class browser without spaces, e.g. \"Application\", \"VI\", \"Control\", "
+                "\"Boolean\", \"WaveformChart\".")
+    if code == 1077:
+        names = pn["items"] if pn["kind"] == "pnode" else [pn["method"]]
+        return (f"{what}: class {pn['class'] or 'Control'} has no {'property' if pn['kind'] == 'pnode' else 'method'} "
+                f"named {names}. Use LabVIEW's short names, e.g. \"Visible\", \"Value\", \"Disabled\", "
+                "\"App.Version\". A node linked to a control is first set to class Control, so give "
+                "properties every control has, or use \"class\" and wire a reference.")
+    return f"configuring {what} failed (error {code})"
+
+
+
 def _spec_names(d: dict) -> set[str]:
     """Every node name declared in a block of spec contents, including nested structures."""
     names: set[str] = set()

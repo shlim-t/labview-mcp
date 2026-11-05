@@ -137,6 +137,28 @@ CASES = {
         "functions": [{"name": "m", "function": "Multiply"}],
         "wires": [["on", "lamp"], ["x", "m.x"], ["x", "m.y"], ["m.x*y", "g"]],
     }, {"power": True}, {"lamp": True, "level": 16.0}),
+    # Property Nodes: a linked one writes Visible, a second reads it back (error wires order them)
+    "prop_nodes": ({
+        "controls": [{"name": "show", "type": "bool", "default": True}, {"name": "x", "type": "dbl"}],
+        "indicators": [{"name": "vis", "type": "bool", "label": "visible now"}],
+        "property_nodes": [{"name": "w", "control": "x", "properties": ["Visible"], "write": True},
+                           {"name": "r", "control": "x", "properties": ["Visible"]}],
+        "wires": [["show", "w.Visible"], ["w.error out", "r.error in"], ["r.Visible", "vis"]],
+    }, {"show": False}, {"visible now": False}),
+    # Invoke Node: Reinitialize To Default on x, then read its Value
+    "invoke_node": ({
+        "controls": [{"name": "x", "type": "dbl", "default": 5}],
+        "indicators": [{"name": "after", "type": "dbl"}],
+        "invoke_nodes": [{"name": "i", "control": "x", "method": "Reinit To Dflt"}],
+        "property_nodes": [{"name": "r", "control": "x", "properties": ["Value"]}],
+        "wires": [["i.error out", "r.error in"], ["r.Value", "after"]],
+    }, {"x": 9}, {"after": 5.0}),
+    # an unlinked Property Node of class Application needs no reference
+    "app_version": ({
+        "indicators": [{"name": "ver", "type": "string", "label": "version"}],
+        "property_nodes": [{"name": "a", "class": "Application", "properties": ["App.Version"]}],
+        "wires": [["a.App.Version", "ver"]],
+    }, {}, {"version": lambda v: isinstance(v, str) and v[:2].isdigit()}),
 }
 
 # UI VIs wait for clicks, so they are checked by their structure instead of by running them.
@@ -150,9 +172,11 @@ UI_CASES = {
             {"control": "stop"},
             {"control": "go", "functions": [{"name": "m", "function": "Multiply"}],
              "constants": [{"name": "k", "type": "dbl", "value": 2}]},
-            {"control": "y", "event": "Mouse Down", "functions": [{"name": "inc", "function": "Increment"}]}]}]}],
+            {"control": "y", "event": "Mouse Down", "functions": [{"name": "inc", "function": "Increment"}],
+             "property_nodes": [{"name": "pv", "control": "x", "properties": ["Visible"], "write": True}],
+             "constants": [{"name": "t", "type": "bool", "value": True}]}]}]}],
         "wires": [["stop", "W.stop"], ["x", "m.x"], ["k", "m.y"], ["m.x*y", "y"],
-                  ["W.i", "inc.x"], ["inc.x+1", "hits"]],
+                  ["W.i", "inc.x"], ["inc.x+1", "hits"], ["t", "pv.Visible"]],
     }, {  # where each front-panel terminal must end up: "" = top level, k = event frame k
         "STOP": 0, "Double it": None, "x": 1, "y": 1, "hits": 2},
         ['[0] "STOP": Value Change', '[1] "Double it": Value Change', '[2] "y": Mouse Down']),
@@ -214,7 +238,7 @@ for name in names:
     try:
         lv.call(lv.vi_create, p, spec, True, "").result()
         got = lv.call(lv.vi_run, p, inputs, list(expect), 10).result()["values"]
-        ok = all(got.get(k) == v for k, v in expect.items())
+        ok = all(v(got.get(k)) if callable(v) else got.get(k) == v for k, v in expect.items())
         failed += not ok
         print(f"{'PASS' if ok else 'FAIL'} {name}: {json.dumps(got)}")
     except Exception as e:

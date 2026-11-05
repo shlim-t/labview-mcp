@@ -4,7 +4,7 @@ An [MCP](https://modelcontextprotocol.io) server that lets AI coding agents — 
 
 LabVIEW source code is a binary, graphical format. Text-based coding agents can't open a `.vi` file. labview-mcp acts as the agent's eyes and hands: it drives your installed LabVIEW over its ActiveX server and returns what the agent needs as text, images, and values.
 
-> Status: **v0.8.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth, and **user interfaces**: front-panel styles (buttons, LEDs, knobs, gauges, charts) and event structures. Any existing VI can be read as a graph (`vi_dump`) and changed in place (`vi_edit`: remove, replace, and add code, including inside existing loops and case frames).
+> Status: **v0.9.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth, and **user interfaces**: front-panel styles (buttons, LEDs, knobs, gauges, charts), event structures, and Property and Invoke Nodes. Any existing VI can be read as a graph (`vi_dump`) and changed in place (`vi_edit`: remove, replace, and add code, including inside existing loops and case frames).
 
 ## What the agent can do
 
@@ -140,6 +140,21 @@ The result follows NI's event-handler pattern:
 
 `"event"` defaults to `"Value Change"`. Other control events include `"Mouse Down"`, `"Mouse Up"`, `"Mouse Enter"`, `"Mouse Leave"`, and `"Key Down"`. Code in a frame can be wired to its own frame and to anything outside the event structure, except shift registers. Event structures are made by `vi_create` only, for now. `vi_run` cannot click buttons, so it stops a UI VI at its time limit.
 
+### Property and Invoke Nodes
+
+```json
+"property_nodes": [{"name": "p", "control": "chart", "properties": ["Visible"], "write": true},
+                   {"name": "a", "class": "Application", "properties": ["App.Version"]}],
+"invoke_nodes":   [{"name": "i", "control": "x", "method": "Reinit To Dflt"}]
+```
+
+- **Linked:** `"control"` links a node to a front-panel object, like right-clicking it and choosing Create ▸ Property Node.
+- **Unlinked:** `"class"` makes an unlinked node. Wire a reference to `"p.reference"`; Application needs none.
+- **Read or write:** properties are read unless `"write"` is `true` or lists them.
+- **Wiring:** wire nodes as `"p.Visible"`, `"i.<parameter>"`, `"p.error in"`, and `"p.error out"`. Chain the error wires to set the order of nodes.
+- **Names:** use LabVIEW's short names, such as `Visible`, `Value`, `DefVal`, `Disabled`, and `App.Version`.
+- **Placement:** nodes work at the top level, in loops and cases, inside event frames, and in `vi_edit`.
+
 Strings are stored in the Windows ANSI code page, as LabVIEW does, so characters outside it (for example `é` on Korean Windows) become the closest match.
 
 Types: `dbl sgl i8 i16 i32 i64 u8 u16 u32 u64 bool string path error`, arrays (`"dbl[]"`, `"i32[][]"`), and clusters (`{"cluster": [{"name": "gain", "type": "dbl"}, ...]}`). Function terminals use the names shown in LabVIEW's Context Help. SubVI terminals use the subVI's control labels.
@@ -198,13 +213,18 @@ agent ──MCP/stdio──▶ labview-mcp ──ActiveX (COM)──▶ LabVIEW.
 - [x] `vi_create`: For/While loops, shift registers, case structures (boolean, integer, string), nesting.
 - [x] `vi_create`: connector pane and error clusters, so generated VIs can call each other.
 - [x] `vi_create`: front-panel styles and event structures (control events) for user interfaces.
-- [ ] Event structures: Timeout, panel events (Panel Close?), event data (NewVal), editing with `vi_edit`; enums; property and invoke nodes; clicking buttons from `vi_run`.
+- [x] Property and Invoke Nodes, linked to controls or of any VI Server class.
+- [ ] A tool that lists a class's properties and methods by short name.
+- [ ] Event structures: Timeout, panel events (Panel Close?), event data (NewVal), editing with `vi_edit`; enums; clicking buttons from `vi_run`.
 - [x] Helper VIs saved for LabVIEW 2015 and later.
 - [ ] Verified on LabVIEW versions older than 2026 and on localized (non-English) LabVIEW.
 
 ## Development
 
-- The helper VIs are edited in LabVIEW from `vis_src/`. `python tools/build_helpers.py` saves them for LabVIEW 2015 into `src/labview_mcp/vis/`, which is what ships.
+- **Hand-built helpers** are edited in LabVIEW from `vis_src/`.
+- **Generated helpers** are built by `python tools/helpergen.py` from Python specs into `vis_src/`. Start from a freshly started LabVIEW so that no VI with the same name is already in memory. The generator uses diagram scripting together with the two hand-built configuration helpers: `lvmcp_propconfig` and `lvmcp_invokeconfig`.
+- **Shipping:** `python tools/build_helpers.py` saves every helper for LabVIEW 2015 into `src/labview_mcp/vis/`, which is what ships.
+- **Class table:** `src/labview_mcp/vi_classes.json` maps VI Server class names to the class numbers used in refnum type descriptors. It was measured by wiring a refnum of each class number into a Property Node and reading the node's class.
 - `tests/live_vi_create.py`, `tests/live_vi_edit.py`, and `tests/smoke_mcp.py` need Windows and LabVIEW. They build real VIs, run them, and check the results.
 
 ## License

@@ -196,7 +196,8 @@ def parse_type(t: Any) -> LVType:
 _NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 # ":" in a terminal reference has crashed LabVIEW; everything else is XML-escaped.
 _TERM_BAD = re.compile(r"[:\x00-\x1f]")
-_CONTENT_KEYS = ("constants", "functions", "subvis", "structures")
+_CONTENT_KEYS = ("constants", "functions", "subvis", "structures", "property_nodes", "invoke_nodes")
+_NODE_KINDS = ("pnode", "inode")  # Property / Invoke Nodes: configured after they are placed
 _STRUCT_TYPES = {"for_loop": "for", "for": "for", "while_loop": "while", "while": "while",
                  "case": "case", "case_structure": "case", "event": "event", "event_structure": "event"}
 # Control events: the value of the "Event Type" enum taken by EventStructure.SetHandledEvents
@@ -218,7 +219,7 @@ _STRUCT_TERMS = {
               "condition": "Loop End Ref", "Loop Counter": "Loop Counter", "Loop End Ref": "Loop End Ref"},
     "case": {"selector": "Case Selector", "Case Selector": "Case Selector"},
 }
-_LEAF_SIZE = {"constant": (70, 25), "function": (40, 40), "subvi": (40, 40),
+_LEAF_SIZE = {"constant": (70, 25), "function": (40, 40), "subvi": (40, 40), "pnode": (110, 60), "inode": (110, 60),
               "control": (50, 30), "indicator": (50, 30)}
 PAD_X, PAD_TOP, PAD_BOTTOM, GAP_X, GAP_Y = 50, 40, 50, 50, 30
 
@@ -229,6 +230,37 @@ STRUCTURE_HELP = (
     "\"apple\", \"default\": false, ...contents}] and optional \"output_tunnels\": [\"t\"]. An event "
     "structure holds \"events\": [{\"control\": \"stop\", \"event\": \"Value Change\", ...contents}], one "
     "frame per entry; \"control\" is the name of a control or indicator in the spec.")
+
+
+NODE_HELP = (
+    "property_nodes: {\"name\": \"p\", \"control\": \"level\", \"properties\": [\"Visible\"], \"write\": true} "
+    "(linked to a front-panel control) or {\"name\": \"p\", \"class\": \"VI\", \"properties\": [...]} (wire a "
+    "reference to \"p.reference\"; class \"Application\" needs none). \"write\": true writes every property, "
+    "a list writes those; the rest are read. invoke_nodes: {\"name\": \"m\", \"control\": \"graph\" | "
+    "\"class\": \"VI\", \"method\": \"Run VI\"}. Wire them as \"p.Visible\", \"m.<parameter>\", "
+    "\"p.reference\", \"p.error in\", \"p.error out\". Names are LabVIEW's short names (\"Visible\", "
+    "\"Value\", \"App.Version\").")
+
+
+def _check_node(pn: dict, kind: str, b) -> None:
+    name = pn.get("name")
+    extra = set(pn) - {"name", "control", "class", "properties", "write", "method"}
+    if extra:
+        raise SpecError(f"{name!r}: unknown keys {sorted(extra)}. {NODE_HELP}")
+    if bool(pn.get("control")) == bool(pn.get("class")):
+        raise SpecError(f"{name!r}: give either \"control\" (a front-panel object) or \"class\". {NODE_HELP}")
+    for k in ("control", "class", "method"):
+        if pn.get(k) is not None and (not isinstance(pn[k], str) or _TERM_BAD.search(pn[k])):
+            raise SpecError(f"{name!r}: bad {k} {pn[k]!r}")
+    if kind == "pnode":
+        props = pn.get("properties")
+        if not isinstance(props, list) or not props or not all(isinstance(x, str) and x for x in props):
+            raise SpecError(f"{name!r}: \"properties\" is a list of property names. {NODE_HELP}")
+        w = pn.get("write", False)
+        if not (isinstance(w, bool) or (isinstance(w, list) and set(w) <= set(props))):
+            raise SpecError(f"{name!r}: \"write\" is true, false or a list of its properties")
+    elif not isinstance(pn.get("method"), str):
+        raise SpecError(f"{name!r}: invoke nodes need \"method\". {NODE_HELP}")
 
 
 @dataclass
@@ -246,6 +278,16 @@ class Script:
     # label, "event": code, "move": [labels of terminals to move in], "bind": [outer names],
     # "script": Script for the frame contents}]}
     events: list = None
+    # Property/Invoke Nodes made by this script: {"name", "out", "kind", "class", "items", "write": [index],
+    # "control": spec name, "method"}; and the wires to them, drawn after they are configured: `late`
+    # (a Script binding its ends) with `late_refs` = ("out", k) | ("in", k) for each bound object.
+    pnodes: list = None
+    late: "Script | None" = None
+    late_refs: list = None
+
+    def has_nodes(self) -> bool:
+        return bool(self.pnodes) or any(fr["script"] is not None and fr["script"].has_nodes()
+                                        for ev in self.events or [] for fr in ev["frames"])
 
 
 @dataclass
@@ -339,6 +381,12 @@ class _Builder:
             if not (pp.is_file() or (llb is not None and llb.is_file())):
                 raise SpecError(f"subvi {s.get('name')!r}: file not found: {path}")
             s["_path"] = str(pp)
+        for kind, key in (("pnode", "property_nodes"), ("inode", "invoke_nodes")):
+            for pn in d.get(key, []) or []:
+                if not isinstance(pn, dict):
+                    raise SpecError(f"{key}: each entry must be an object. {NODE_HELP}")
+                self.add(pn.get("name"), kind, container, pn)
+                _check_node(pn, kind, self)
         for st in d.get("structures", []) or []:
             self.collect_structure(st, container)
 
@@ -413,6 +461,13 @@ class _Builder:
         if term and _TERM_BAD.search(term):
             raise SpecError(f"wire end {end!r}: bad terminal name")
         k = n.kind
+        if k in _NODE_KINDS:
+            if not term:
+                raise SpecError(f"wire end {end!r}: give the terminal: a property (\"{node}.Visible\"), a "
+                                f"method parameter, \"{node}.reference\", \"{node}.error in\" or \"{node}.error out\"")
+            if term == "error in":  # the terminal's real name
+                return f"{node}.error in (no error)"
+            return end
         if k in ("function", "subvi"):
             if not term:
                 raise SpecError(f"wire end {end!r}: give the terminal, e.g. \"{node}.x\"")
@@ -525,7 +580,8 @@ class _Builder:
         return None
 
     _BIND_TAG = {"existing": "Control", "constant": "Constant", "function": "Function",
-                 "subvi": "SubVI", "for": "Structure", "while": "Structure", "case": "MultiframeStructure"}
+                 "subvi": "SubVI", "for": "Structure", "while": "Structure", "case": "MultiframeStructure",
+                 "pnode": "Function", "inode": "Function"}
 
     def emit_bindings(self, pos, wires, out: list):
         """Name the existing objects (ObjRefsIn order) and add new contents inside existing structures."""
@@ -599,6 +655,9 @@ class _Builder:
             elif n.kind == "subvi":
                 out.append(f"<SubVI name={quoteattr(name)} path={quoteattr(n.spec['_path'])} ignoreSearchDialog=\"TRUE\" "
                            f"position=\"{p}\"{o}></SubVI>")
+            elif n.kind in _NODE_KINDS:  # placed generic; class and items are set afterwards
+                style = "Property Node" if n.kind == "pnode" else "Invoke Node"
+                out.append(f"<Function name={quoteattr(name)} style=\"{style}\" position=\"{p}\"{o}></Function>")
             elif n.kind == "event":
                 # Created with its one default frame; the frames are added and registered afterwards.
                 w, h = self.size(name, wires)
@@ -732,7 +791,7 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
         # A diagram holding only terminals is saved by LabVIEW as a file it cannot reopen.
         raise SpecError("the diagram needs at least one constant, function, subVI or structure")
 
-    wires = []
+    wires, late_raw = [], []
     frame_wires: dict[str, list] = {}  # event frame id -> wires drawn in that frame, in spec syntax
     vc_frame: dict[str, str] = {}  # control -> its only Value Change frame
     for n in list(b.nodes.values()):
@@ -752,7 +811,10 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
             # [button, loop.stop]: read the button in its own Value Change frame (NI's pattern;
             # a latched button only resets when its terminal is read) and stop the loop from there.
             frames = {vc_frame[w[0]]}
-        if not frames:
+        if not frames and any(b.nodes[e.partition(".")[0]].kind in _NODE_KINDS
+                              and b.nodes[e.partition(".")[0]].bind is None for e in w):
+            late_raw.append(list(w))  # a Property/Invoke Node has its terminals once it is configured
+        elif not frames:
             wires.append(ends)
         elif len(frames) > 1:
             raise SpecError(f"wire {list(w)!r} joins two different event frames")
@@ -762,6 +824,7 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
         n.kind == "event" for n in b.nodes.values()) else []
     if events and (edit or existing):
         raise SpecError("event structures can only be made by vi_create for now")
+    pnodes, late, late_refs = _plan_nodes(b, late_raw, labels)
 
     pos: dict[str, tuple[int, int]] = {}
     b.place("", origin, wires, pos)
@@ -802,7 +865,37 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
         outs=sorted(b.out_index, key=b.out_index.get),
         events=[dict(e, out=b.out_index[e["name"]]) for e in
                 sorted(events, key=lambda e: b.event_order.index(e["name"]))],
+        pnodes=pnodes, late=late, late_refs=late_refs,
     )
+
+
+def _plan_nodes(b: _Builder, late_raw: list, labels: dict):
+    """Property/Invoke Nodes of this script (not those in event frames: their frame's script has them)
+    and the script that wires them once configured."""
+    pnodes = []
+    for name, n in b.nodes.items():
+        if n.kind not in _NODE_KINDS or n.bind is not None or b.event_frame(name):
+            continue
+        out = b.out_index.setdefault(name, len(b.out_index))
+        s = n.spec
+        items = list(s.get("properties") or [])
+        w = s.get("write", False)
+        write = list(range(len(items))) if w is True else [items.index(x) for x in w or []]
+        pnodes.append({"name": name, "out": out, "kind": n.kind, "class": s.get("class"), "items": items,
+                       "write": write, "control": s.get("control"), "method": s.get("method")})
+    if not late_raw:
+        return pnodes, None, None
+    ends = sorted({e.partition(".")[0] for w in late_raw for e in w})
+    existing, refs = [], []
+    for nm in ends:
+        n = b.nodes[nm]
+        if n.kind in ("shiftreg", "tunnel", "event"):
+            raise SpecError(f"a Property/Invoke Node cannot be wired to {nm!r} (a {n.kind}) yet; wire it "
+                            "through a function or constant")
+        existing.append({"name": nm, "kind": "existing" if n.kind in ("control", "indicator") else n.kind})
+        refs.append(("in", n.bind) if n.bind is not None else ("out", b.out_index.setdefault(nm, len(b.out_index))))
+    late = build({"wires": late_raw}, existing=existing, edit=True)
+    return pnodes, late, refs
 
 
 # vi_dump-style kinds of objects that code in an event frame can be wired to -> how they are bound

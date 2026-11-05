@@ -168,5 +168,17 @@ for method in ("dfir", "scan"):
     got = sorted(json.dumps(n.get("value")) for n in g["nodes"] if n["kind"] == "constant")
     check(f"constant values ({method})", got == want, got)
 
+# vi_edit adds a Property Node linked to an existing control (and a style to a new control)
+pe = os.path.join(D, "prop_edit.vi")
+call(lv.vi_create, pe, {"controls": [{"name": "x", "type": "dbl", "default": 7}],
+                        "indicators": [{"name": "y", "type": "dbl"}],
+                        "wires": [["x", "y"]], "constants": [{"name": "z", "type": "i32", "value": 0}]}, True, "")
+call(lv.vi_edit, pe, {"existing": {"x": "x"},
+                      "indicators": [{"name": "d", "type": "dbl", "label": "default of x", "style": "Gauge"}],
+                      "property_nodes": [{"name": "p", "control": "x", "properties": ["DefVal"]}],
+                      "wires": [["p.DefVal", "d"]]}, False, False)
+vals = call(lv.vi_run, pe, {"x": 2}, [], 10)["values"]
+check("edit adds a property node", vals.get("default of x") == 7.0 and vals.get("y") == 2.0, vals)
+
 print(f"{'all passed' if not failed else f'{failed} failed'}; files in {D}")
 sys.exit(1 if failed else 0)
