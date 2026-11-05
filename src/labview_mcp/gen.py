@@ -198,7 +198,18 @@ _NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 _TERM_BAD = re.compile(r"[:\x00-\x1f]")
 _CONTENT_KEYS = ("constants", "functions", "subvis", "structures")
 _STRUCT_TYPES = {"for_loop": "for", "for": "for", "while_loop": "while", "while": "while",
-                 "case": "case", "case_structure": "case"}
+                 "case": "case", "case_structure": "case", "event": "event", "event_structure": "event"}
+# Control events: the value of the "Event Type" enum taken by EventStructure.SetHandledEvents
+# (measured on LabVIEW 2026 by registering each value and reading the frame's caption).
+CONTROL_EVENTS = {
+    "Value Change": 67, "Mouse Down": 38, "Mouse Down?": 39, "Mouse Up": 43, "Mouse Enter": 40,
+    "Mouse Leave": 41, "Mouse Move": 42, "Mouse Wheel": 44, "Key Down": 28, "Key Down?": 29,
+    "Key Repeat": 30, "Key Repeat?": 31, "Key Up": 32, "Drag Ended": 19, "Drag Enter": 20,
+    "Drag Leave": 21, "Drag Over": 22, "Drag Source Update": 23, "Drag Starting": 24,
+    "Drag Starting?": 25, "Drop": 26, "Shortcut Menu Activation?": 52,
+    "Shortcut Menu Selection (App)": 53, "Shortcut Menu Selection? (App)": 54,
+    "Shortcut Menu Selection (User)": 55,
+}
 # Friendly names for structure terminals -> LabVIEW's names.
 _STRUCT_TERMS = {
     "for": {"N": "Loop Count", "count": "Loop Count", "i": "Loop Counter", "iteration": "Loop Counter",
@@ -215,7 +226,9 @@ STRUCTURE_HELP = (
     "structures: {\"name\": \"L\", \"type\": \"for_loop\" | \"while_loop\" | \"case\", ...contents}. "
     "Loops hold constants/functions/subvis/structures and optional \"shift_registers\": [\"sr\"]; "
     "while loops take \"stop_if_true\" (default true). A case holds \"cases\": [{\"value\": true | 3 | "
-    "\"apple\", \"default\": false, ...contents}] and optional \"output_tunnels\": [\"t\"].")
+    "\"apple\", \"default\": false, ...contents}] and optional \"output_tunnels\": [\"t\"]. An event "
+    "structure holds \"events\": [{\"control\": \"stop\", \"event\": \"Value Change\", ...contents}], one "
+    "frame per entry; \"control\" is the name of a control or indicator in the spec.")
 
 
 @dataclass
@@ -227,6 +240,12 @@ class Script:
     defaults: dict[str, Any]  # front-panel label -> default value (set after generation)
     connector: dict[str, str]  # front-panel label -> connector pane slot
     wires: list = None  # (driver, sink) pairs in LabVIEW terminal syntax
+    styles: dict = None  # front-panel label -> palette name to replace the control with
+    outs: list = None    # node names whose references the script returns (Obj Refs Out[] order)
+    # Event structures, in creation order: {"name", "out": index into outs, "frames": [{"control":
+    # label, "event": code, "move": [labels of terminals to move in], "bind": [outer names],
+    # "script": Script for the frame contents}]}
+    events: list = None
 
 
 @dataclass
@@ -249,6 +268,8 @@ class _Builder:
         self.owner_of: dict[str, str] = {"": ""}        # container id -> owning structure name
         self.children: dict[str, list[str]] = {"": []}  # container id -> node names, spec order
         self.types: list[tuple[bytes, bytes]] = []
+        self.out_index: dict[str, int] = {}  # new objects whose references the script returns
+        self.event_order: list[str] = []     # event structures in emit (= creation) order
 
     # -- collection
     def add(self, name, kind, container, spec, owner=""):
@@ -336,6 +357,30 @@ class _Builder:
             self.collect(st, name)
             for sr in st.get("shift_registers", []) or []:
                 self.add(sr, "shiftreg", container, {}, owner=name)
+        elif kind == "event":
+            allowed = {"name", "type", "events"}
+            events = st.get("events")
+            if not isinstance(events, list) or not events:
+                raise SpecError(f"event structure {name!r} needs \"events\": [{{\"control\": \"stop\", "
+                                "\"event\": \"Value Change\", ...contents}, ...]")
+            for i, fr in enumerate(events):
+                if not isinstance(fr, dict):
+                    raise SpecError(f"event structure {name!r}: each entry of events must be an object")
+                extra = set(fr) - {"control", "event", *_CONTENT_KEYS}
+                if extra:
+                    raise SpecError(f"event structure {name!r} event {i}: unknown keys {sorted(extra)}")
+                src = self.nodes.get(fr.get("control"))
+                if src is None or src.kind not in ("control", "indicator"):
+                    raise SpecError(f"event structure {name!r} event {i}: \"control\" must name a control "
+                                    "or indicator of this spec")
+                ev = fr.get("event", "Value Change")
+                if ev not in CONTROL_EVENTS:
+                    raise SpecError(f"event structure {name!r} event {i}: unknown event {ev!r}. Events: "
+                                    f"{sorted(CONTROL_EVENTS)}")
+                fid = f"{name}#{i}"
+                self.owner_of[fid] = name
+                self.children[fid] = []
+                self.collect(fr, fid)
         else:
             allowed = {"name", "type", "cases", "output_tunnels"}
             cases = st.get("cases")
@@ -453,7 +498,31 @@ class _Builder:
             return [name]
         if n.bind is not None:
             return [f"{name}#{i}" for i in n.spec.get("_frames", [])]
-        return [f"{name}#{i}" for i in range(len(n.spec["cases"]))]
+        return [f"{name}#{i}" for i in range(len(n.spec["events" if n.kind == "event" else "cases"]))]
+
+    def encloses(self, end: str, fid: str) -> bool:
+        """`end` is the stop terminal of a while loop around the event structure of frame `fid`."""
+        loop, _, term = end.partition(".")
+        if self.nodes.get(loop) is None or self.nodes[loop].kind != "while" or \
+                _STRUCT_TERMS["while"].get(term) != "Loop End Ref":
+            return False
+        c = self.nodes[self.owner_of[fid]].container
+        while c:
+            if self.owner_of[c] == loop:
+                return True
+            c = self.nodes[self.owner_of[c]].container
+        return False
+
+    def event_frame(self, name: str) -> str | None:
+        """The event-structure frame ("E#1") that holds node `name`, if any."""
+        n = self.nodes[name]
+        c = self.nodes[n.owner].container if n.kind in ("shiftreg", "tunnel") else n.container
+        while c:
+            owner = self.owner_of[c]
+            if self.nodes[owner].kind == "event" and c != owner:
+                return c
+            c = self.nodes[owner].container
+        return None
 
     _BIND_TAG = {"existing": "Control", "constant": "Constant", "function": "Function",
                  "subvi": "SubVI", "for": "Structure", "while": "Structure", "case": "MultiframeStructure"}
@@ -490,9 +559,10 @@ class _Builder:
         for n, (rx, ry) in rel.items():
             ax, ay = origin[0] + rx, origin[1] + ry
             out[n] = (ax, ay)
-            if self.nodes[n].kind in ("for", "while", "case"):
+            if self.nodes[n].kind in ("for", "while", "case", "event"):
                 # A loop's contents are positioned relative to the loop; case frames share the
-                # coordinates of the diagram that holds the case.
+                # coordinates of the diagram that holds the case. (Event frames are generated in
+                # their own scripts later; their layout here only sizes the structure.)
                 inner = (PAD_X, PAD_TOP) if self.nodes[n].kind in ("for", "while") else (ax + PAD_X, ay + PAD_TOP)
                 for b in self.bodies(n):
                     self.place(b, inner, wires, out)
@@ -503,31 +573,44 @@ class _Builder:
         self.types.append((lt.td(), lt.data(value)))
         return len(self.types) - 1
 
+    def out_attr(self, name: str) -> str:
+        """Ask LabVIEW for a reference to this new object (returned in Obj Refs Out[])."""
+        if name not in self.out_index:
+            return ""
+        return f" out=\"{self.out_index[name]}\""
+
     def emit(self, container: str, pos, wires, out: list):
         for name in self.children[container]:
             n = self.nodes[name]
             p = _pos(*pos[name])
+            o = self.out_attr(name)
             if n.kind == "constant":
                 ti = self.add_type(n.spec.get("type", "dbl"), n.spec.get("value"))
-                out.append(f"<Constant name={quoteattr(name)} typeindex=\"{ti}\" position=\"{p}\"></Constant>")
+                out.append(f"<Constant name={quoteattr(name)} typeindex=\"{ti}\" position=\"{p}\"{o}></Constant>")
             elif n.kind == "function":
                 style = n.spec["function"].strip()
                 size = n.spec.get("size", n.spec.get("inputs"))
                 if size is None:
-                    out.append(f"<Function name={quoteattr(name)} style={quoteattr(style)} position=\"{p}\"></Function>")
+                    out.append(f"<Function name={quoteattr(name)} style={quoteattr(style)} position=\"{p}\"{o}></Function>")
                 else:
                     tag = "BuildArray" if style.lower() == "build array" else "GrowableFunction"
                     out.append(f"<{tag} name={quoteattr(name)} style={quoteattr(style)} size=\"{int(size)}\" "
-                               f"position=\"{p}\"></{tag}>")
+                               f"position=\"{p}\"{o}></{tag}>")
             elif n.kind == "subvi":
                 out.append(f"<SubVI name={quoteattr(name)} path={quoteattr(n.spec['_path'])} ignoreSearchDialog=\"TRUE\" "
-                           f"position=\"{p}\"></SubVI>")
+                           f"position=\"{p}\"{o}></SubVI>")
+            elif n.kind == "event":
+                # Created with its one default frame; the frames are added and registered afterwards.
+                w, h = self.size(name, wires)
+                self.event_order.append(name)
+                out.append(f"<MultiframeStructure name={quoteattr(name)} style=\"Event Structure\" "
+                           f"position=\"{p}\" width=\"{w}\" height=\"{h}\"{o}></MultiframeStructure>")
             elif n.kind in ("for", "while", "case"):
                 w, h = self.size(name, wires)
                 side = [m for m in self.nodes.values() if m.owner == name]
                 if n.kind == "case":
                     out.append(f"<MultiframeStructure name={quoteattr(name)} style=\"Case Structure\" "
-                               f"position=\"{p}\" width=\"{w}\" height=\"{h}\">")
+                               f"position=\"{p}\" width=\"{w}\" height=\"{h}\"{o}>")
                     for i, fr in enumerate(n.spec["cases"]):
                         val = fr.get("value")
                         if isinstance(val, bool):
@@ -548,7 +631,7 @@ class _Builder:
                         cond = " loopCondition=\"" + ("Stop if True" if n.spec.get("stop_if_true", True)
                                                      else "Continue if True") + "\""
                     out.append(f"<Structure name={quoteattr(name)} style=\"{style}\" position=\"{p}\" "
-                               f"width=\"{w}\" height=\"{h}\"{cond}>")
+                               f"width=\"{w}\" height=\"{h}\"{cond}{o}>")
                     self.emit(name, pos, wires, out)
                     for k, sr in enumerate(side):
                         out.append(f"<ShiftRegister name={quoteattr(sr.name)} location=\"left\" "
@@ -630,10 +713,16 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
         b.add_existing(e["name"], e.get("kind", "existing"), i, e.get("spec") or {})
     controls = [dict(c, _ind=False) for c in spec.get("controls", []) or []] + \
                [dict(c, _ind=True) for c in spec.get("indicators", []) or []]
-    labels, defaults = {}, {}
+    labels, defaults, styles = {}, {}, {}
     for c in controls:
         b.add(c.get("name"), "indicator" if c["_ind"] else "control", "", c)
         labels[c["name"]] = str(c.get("label") or c["name"])
+        if c.get("style") is not None:
+            st = c["style"]
+            if not isinstance(st, str) or not st.strip() or _TERM_BAD.search(st):
+                raise SpecError(f"{c['name']!r}: \"style\" is the name of a front-panel control as shown "
+                                "in the Controls palette, e.g. \"Stop Button\", \"Round LED\", \"Waveform Chart\"")
+            styles[labels[c["name"]]] = st.strip()
         if c.get("default") is not None:
             if c["_ind"]:
                 raise SpecError(f"indicator {c['name']!r} cannot have a default")
@@ -644,12 +733,35 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
         raise SpecError("the diagram needs at least one constant, function, subVI or structure")
 
     wires = []
+    frame_wires: dict[str, list] = {}  # event frame id -> wires drawn in that frame, in spec syntax
+    vc_frame: dict[str, str] = {}  # control -> its only Value Change frame
+    for n in list(b.nodes.values()):
+        if n.kind == "event":
+            for i, fr in enumerate(n.spec["events"]):
+                if fr.get("event", "Value Change") == "Value Change" and b.nodes[fr["control"]].kind == "control":
+                    vc_frame[fr["control"]] = None if fr["control"] in vc_frame else f"{n.name}#{i}"
+    vc_frame = {k: v for k, v in vc_frame.items() if v}
     for w in spec.get("wires", []) or []:
         if isinstance(w, dict):
             w = [w.get("from"), w.get("to")]
         if not (isinstance(w, (list, tuple)) and len(w) == 2 and all(isinstance(x, str) for x in w)):
             raise SpecError(f"wire {w!r} must be [\"from\", \"to\"]")
-        wires.append((b.resolve(w[0]), b.resolve(w[1])))
+        ends = (b.resolve(w[0]), b.resolve(w[1]))
+        frames = {f for f in (b.event_frame(e.partition(".")[0]) for e in w) if f}
+        if not frames and w[0] in vc_frame and b.encloses(w[1], vc_frame[w[0]]):
+            # [button, loop.stop]: read the button in its own Value Change frame (NI's pattern;
+            # a latched button only resets when its terminal is read) and stop the loop from there.
+            frames = {vc_frame[w[0]]}
+        if not frames:
+            wires.append(ends)
+        elif len(frames) > 1:
+            raise SpecError(f"wire {list(w)!r} joins two different event frames")
+        else:
+            frame_wires.setdefault(frames.pop(), []).append(list(w))
+    events = _plan_events(b, frame_wires, wires, labels) if any(
+        n.kind == "event" for n in b.nodes.values()) else []
+    if events and (edit or existing):
+        raise SpecError("event structures can only be made by vi_create for now")
 
     pos: dict[str, tuple[int, int]] = {}
     b.place("", origin, wires, pos)
@@ -671,7 +783,7 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
                    + (" indicator=\"TRUE\"" if c["_ind"] else "")
                    + f" label={quoteattr(labels[n])}"
                    + (f" conpaneidx=\"{CONPANE_SLOTS[conpane[n]]}\"" if n in conpane else "")
-                   + f" position=\"{_pos(*fp)}\"></Control>")
+                   + f" position=\"{_pos(*fp)}\"{b.out_attr(n)}></Control>")
         out.append(f"<ControlTerminal controlname={quoteattr(n)} position=\"{_pos(*pos[n])}\"></ControlTerminal>")
     b.emit("", pos, wires, out)
     # LabVIEW's scripting resolves a wire from its sink: source = where data goes, destination = driver.
@@ -686,4 +798,66 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
         defaults=defaults,
         connector={labels[n]: slot for n, slot in conpane.items()},
         wires=wires,
+        styles=styles,
+        outs=sorted(b.out_index, key=b.out_index.get),
+        events=[dict(e, out=b.out_index[e["name"]]) for e in
+                sorted(events, key=lambda e: b.event_order.index(e["name"]))],
     )
+
+
+# vi_dump-style kinds of objects that code in an event frame can be wired to -> how they are bound
+_FRAME_BIND = {"control": "existing", "indicator": "existing", "constant": "constant",
+               "function": "function", "subvi": "subvi", "for": "for", "while": "while", "case": "case"}
+
+
+def _plan_events(b: _Builder, frame_wires: dict, main_wires: list, labels: dict) -> list:
+    """Each event frame becomes its own script, run on the frame's diagram after the frame exists.
+    Objects outside the frame that its wires reach are bound by reference (Obj Refs Out of the
+    main script -> Obj Refs In of the frame's script)."""
+    def ends(ws):
+        return {str(e).partition(".")[0] for w in ws for e in w}
+
+    outside_wired = ends([(a.partition(".")[0], z.partition(".")[0]) for a, z in main_wires])
+    events = []
+    for name, n in b.nodes.items():
+        if n.kind != "event":
+            continue
+        b.out_index.setdefault(name, len(b.out_index))
+        frames = []
+        for i, fr in enumerate(n.spec["events"]):
+            fid = f"{name}#{i}"
+            fw = frame_wires.get(fid, [])
+            inside = {m for m in b.nodes if b.event_frame(m) == fid}
+            bind = sorted(ends(fw) - inside)
+            for o in bind:
+                k = b.nodes[o].kind
+                if k not in _FRAME_BIND or b.event_frame(o):
+                    raise SpecError(
+                        f"event {name!r} frame {i}: code in an event frame cannot be wired to {o!r} (a "
+                        f"{k}). It can be wired to controls, indicators, constants, functions, subVIs and "
+                        "loop or case structures outside the event structure, but not to shift registers "
+                        "or to code in another event frame")
+                b.out_index.setdefault(o, len(b.out_index))
+            ctl = fr["control"]
+            # NI's practice: a front-panel terminal used by one event case sits in that case, so a
+            # control is read when the event happens (not once before the loop) and an indicator is
+            # written there. A button's own Value Change case reads it even when it is not wired (a
+            # latched button resets only when its terminal is read).
+            other = outside_wired | {e for f2, w2 in frame_wires.items() if f2 != fid for e in ends(w2)}
+            terms = [o for o in bind if b.nodes[o].kind in ("control", "indicator") and o not in other]
+            if (b.nodes[ctl].kind == "control" and fr.get("event", "Value Change") == "Value Change"
+                    and ctl not in other and ctl not in terms):
+                terms.append(ctl)
+            contents = {k: v for k, v in fr.items() if k in _CONTENT_KEYS}
+            script = None
+            if fw or any(contents.values()):
+                script = build({**contents, "wires": fw},
+                               existing=[{"name": o, "kind": _FRAME_BIND[b.nodes[o].kind]} for o in bind],
+                               origin=(40, 40), edit=True)
+                if script.events:
+                    raise SpecError(f"event {name!r} frame {i}: an event structure inside an event "
+                                    "frame is not supported")
+            frames.append({"control": labels[ctl], "event": CONTROL_EVENTS[fr.get("event", "Value Change")],
+                           "move": [labels[t] for t in terms], "bind": bind, "script": script})
+        events.append({"name": name, "frames": frames})
+    return events

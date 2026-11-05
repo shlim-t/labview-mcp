@@ -306,12 +306,27 @@ class LabVIEW:
             raise LabVIEWError(f"a different VI named {p.name} is already in LabVIEW's memory "
                                f"({target.Path}); pick another file name")
         target._FlagAsMethod("SaveInstrument")
-        status, code, source = self._gen_script(target, script.xml, script.type_strings, script.data_strings)
+        later = bool(script.events or script.styles)  # tidy the diagram once everything is in place
+        status, code, source = self._gen_script(target, script.xml, script.type_strings, script.data_strings,
+                                                raw=later)
         if status:
             hint = _GEN_ERRORS.get(code, "")
             raise LabVIEWError(
                 f"LabVIEW rejected the diagram (error {code}){': ' + hint if hint else ''}. "
                 f"The file {p} was left as an empty VI.\nLabVIEW said: {_strip_html(str(source))}")
+        try:
+            if script.events:
+                outs = dict(zip(script.outs, self._gen_out))
+                if len(outs) != len(script.outs):
+                    raise LabVIEWError("LabVIEW did not return the references of the new objects")
+                self._build_events(target, script.events, outs)
+            if script.styles:
+                self._apply_styles(target, script.styles)
+            if later:
+                status, code, source = self._gen_script(target, "<Script>\n</Script>", [], [])  # Clean Up
+        except LabVIEWError as e:
+            target.SaveInstrument(str(p), False, False)
+            raise LabVIEWError(f"{e} The VI was saved as far as it got: {p}") from None
         if script.defaults:
             # LabVIEW's scripting ignores the data for controls, so set the values and
             # make them the defaults.
@@ -333,6 +348,13 @@ class LabVIEW:
             "connector_pane": script.connector,
             "script_xml": script.xml,
         }
+        if script.events:
+            names = {v: k for k, v in gen.CONTROL_EVENTS.items()}
+            res["event_frames"] = {ev["name"]: [f"[{i}] \"{fr['control']}\": {names[fr['event']]}"
+                                                for i, fr in enumerate(ev["frames"])]
+                                   for ev in script.events}
+        if script.styles:
+            res["styled"] = script.styles
         made = self._sink_count(str(p))
         if made is not None and made < len(script.wires):
             res["warning"] = (f"only {made} of {len(script.wires)} wires were connected; LabVIEW silently "
@@ -350,10 +372,99 @@ class LabVIEW:
         boot.SetControlValue("Obj Refs In[]", list(refs))
         try:
             boot.Run(False)
+            # references to the objects created with an out="k" attribute
+            self._gen_out = list(_try(lambda: boot.GetControlValue("Obj Refs Out[]"), ()) or ())
             return boot.GetControlValue("error out")
         finally:
             if refs:
                 _try(lambda: boot.SetControlValue("Obj Refs In[]", []))
+
+    def _run_checked(self, h, what: str) -> None:
+        h.Run(False)
+        status, code, source = h.GetControlValue("error out")
+        if status:
+            raise LabVIEWError(f"{what} failed (error {code}). {_strip_html(str(source))}")
+
+    def _apply_styles(self, target, styles: dict) -> None:
+        """Replace front-panel controls with the palette object named, e.g. "Stop Button". The label,
+        terminal and wires stay."""
+        h = self._helper(REPLACE_VI)
+        fp = self._fp_refs_by_label(target)
+        for label, style in styles.items():
+            h.SetControlValue("reference", fp[label])
+            h.SetControlValue("Style", _ANY_STYLE)
+            h.SetControlValue("Palette String", style)
+            h.Run(False)
+            status, code, _ = h.GetControlValue("error out")
+            if status:
+                raise LabVIEWError(
+                    f"cannot make {label!r} a {style!r} (error {code}). \"style\" is the name shown in "
+                    "LabVIEW's Controls palette for an object of the same data type, e.g. \"Stop Button\", "
+                    "\"OK Button\", \"Round LED\", \"Vertical Toggle Switch\" for booleans; \"Knob\", "
+                    "\"Gauge\", \"Thermometer\", \"Waveform Chart\" for numbers.")
+
+    def _event_frame_diagrams(self, target) -> list[list]:
+        """Diagram refnums of every event frame: one list per event structure in creation order,
+        frames in creation order (UIDs grow as objects are created)."""
+        h = self._helper(UIDS_VI)
+        h.SetControlValue("VI Refnum", target)
+        h.SetControlValue("Traverse Target", 1)
+        h.SetControlValue("Class Name", "EventStructure")
+        h.Run(False)
+        evs = sorted(h.GetControlValue("UIDs") or ())
+        h.SetControlValue("Class Name", "Diagram")
+        h.Run(False)
+        rows = sorted(zip(h.GetControlValue("UIDs") or (), h.GetControlValue("Owner UIDs") or (),
+                          h.GetControlValue("References") or ()))
+        return [[r for _, o, r in rows if o == ev] for ev in evs]
+
+    def _build_events(self, target, events: list, outs: dict) -> None:
+        """Give each new event structure its frames: register the events, then generate each frame's
+        code on the frame's own diagram."""
+        from win32com.client import VARIANT
+        arr = pythoncom.VT_ARRAY | pythoncom.VT_VARIANT
+        add, reg = self._helper(ADDFRAME_VI), self._helper(EVENTS_VI)
+        fp = self._fp_refs_by_label(target)
+        for ev in events:
+            es = outs[ev["name"]]
+            for i, fr in enumerate(ev["frames"]):
+                if i:
+                    add.SetControlValue("reference", es)
+                    add.SetControlValue("Reference Frame Index", i - 1)
+                    add.SetControlValue("After? (T)", True)
+                    self._run_checked(add, f"adding frame {i} to event structure {ev['name']!r}")
+                # Frame 0 is the Timeout frame LabVIEW makes; registering an event replaces it.
+                reg.SetControlValue("reference", es)
+                reg.SetControlValue("Frame Index", i)
+                reg.SetControlValue("Static App/VI Events", VARIANT(arr, []))
+                # cluster order: Event Type, Reference, Limit (-1 = none), Lock Panel?
+                reg.SetControlValue("Static Control Events", VARIANT(
+                    arr, [VARIANT(arr, [fr["event"], fp[fr["control"]], -1, False])]))
+                self._run_checked(reg, f"registering the event of frame {i} of {ev['name']!r}")
+        _try(lambda: reg.SetControlValue("Static Control Events", VARIANT(arr, [])))
+        n_frames = [len(ev["frames"]) for ev in events]
+        if [len(d) for d in self._event_frame_diagrams(target)] != n_frames:
+            raise LabVIEWError("could not find the frames of the new event structures")
+        for j, ev in enumerate(events):
+            for i, fr in enumerate(ev["frames"]):
+                passes = []
+                if fr["move"]:  # front-panel terminals used only here go into the frame
+                    xml = "".join(f"<Control name=\"t{k}\" in=\"{k}\"></Control><ControlTerminal "
+                                  f"controlname=\"t{k}\" position=\"(20,{20 + 40 * k})\"></ControlTerminal>"
+                                  for k in range(len(fr["move"])))
+                    passes.append((f"<Script>{xml}</Script>", [], [], [fp[t] for t in fr["move"]]))
+                if fr["script"] is not None:
+                    s = fr["script"]
+                    passes.append((s.xml, s.type_strings, s.data_strings, [outs[n] for n in fr["bind"]]))
+                for xml, ts, ds, refs in passes:
+                    # the helper closes the diagram reference it is given, so look it up each time
+                    diag = self._event_frame_diagrams(target)[j][i]
+                    status, code, source = self._gen_on_diagram(diag, xml, ts, ds, refs)
+                    if status:
+                        hint = _GEN_ERRORS.get(code, "")
+                        raise LabVIEWError(
+                            f"LabVIEW rejected the code of event frame {i} of {ev['name']!r} (error {code})"
+                            f"{': ' + hint if hint else ''}. {_strip_html(str(source))}")
 
     def _probe_vi(self):
         """A scratch VI kept in memory (never saved) for probing terminal names."""
@@ -647,6 +758,12 @@ class LabVIEW:
             hint = _GEN_ERRORS.get(code, "")
             raise LabVIEWError(f"LabVIEW rejected the edit (error {code}){': ' + hint if hint else ''}. "
                                f"The VI was reverted and not saved.\nLabVIEW said: {_strip_html(str(source))}")
+        if script.styles:
+            try:
+                self._apply_styles(target, script.styles)
+            except LabVIEWError as e:
+                _try(lambda: target.Revert())
+                raise LabVIEWError(f"{e} The VI was reverted and not saved.") from None
         broken = target.ExecState == 0
         after = self._sink_count(path)
         n_wires = len(script.wires) + sum(len(fs[3].wires) for fs in frame_scripts)
@@ -904,6 +1021,10 @@ RAW_GEN_VI = VIS_DIR / "lvmcp_gen_script_raw.vi"
 UIDS_VI = VIS_DIR / "lvmcp_uids.vi"
 DELETE_VI = VIS_DIR / "lvmcp_delete.vi"
 DIAG_GEN_VI = VIS_DIR / "lvmcp_gen_script_diag.vi"
+REPLACE_VI = VIS_DIR / "lvmcp_replace.vi"
+ADDFRAME_VI = VIS_DIR / "lvmcp_addframe.vi"
+EVENTS_VI = VIS_DIR / "lvmcp_events.vi"
+_ANY_STYLE = 4294967295  # GObject.Replace "Style": -1 as U32, find the object by its palette name
 _REMOVE_CORE = Path("vi.lib") / "Utility" / "QuickDropSupport" / "Remove and Rewire Objects_core.vi"
 # vi_dump node kinds that vi_edit can bind or remove -> gen kinds
 _EDIT_KINDS = {"function": "function", "subvi": "subvi", "constant": "constant",

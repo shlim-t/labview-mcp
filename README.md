@@ -4,7 +4,7 @@ An [MCP](https://modelcontextprotocol.io) server that lets AI coding agents — 
 
 LabVIEW source code is a binary, graphical format. Text-based coding agents can't open a `.vi` file. labview-mcp acts as the agent's eyes and hands: it drives your installed LabVIEW over its ActiveX server and returns what the agent needs as text, images, and values.
 
-> Status: **v0.7.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth. Any existing VI can be read as a graph (`vi_dump`) and changed in place (`vi_edit`: remove, replace, and add code, including inside existing loops and case frames).
+> Status: **v0.8.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth, and **user interfaces**: front-panel styles (buttons, LEDs, knobs, gauges, charts) and event structures. Any existing VI can be read as a graph (`vi_dump`) and changed in place (`vi_edit`: remove, replace, and add code, including inside existing loops and case frames).
 
 ## What the agent can do
 
@@ -20,7 +20,7 @@ LabVIEW source code is a binary, graphical format. Text-based coding agents can'
 | `vi_edit` | **Changes an existing VI in place.** It removes nodes, adds code, and wires to existing controls, nodes, loops, and case frames (by `vi_dump` id). The rest of the diagram keeps its layout. It backs up the VI first, and reverts instead of saving if the result is broken or a wire could not be made. |
 | `lv_functions` | Searches the palette functions in your LabVIEW install by name. |
 | `function_terminals` | Exact terminal names of a function, **verified against LabVIEW's scripting engine** so the agent wires them right the first time. |
-| `vi_create` | **Builds a new VI** from a JSON spec: typed controls and indicators with defaults, constants, palette functions, subVI calls, For/While loops, shift registers, case structures, and wires. LabVIEW's Clean Up Diagram tidies the result, and the tool returns a picture of it. |
+| `vi_create` | **Builds a new VI** from a JSON spec: typed controls and indicators with defaults and front-panel styles, constants, palette functions, subVI calls, For/While loops, shift registers, case structures, event structures, and wires. LabVIEW's Clean Up Diagram tidies the result, and the tool returns pictures of it. |
 
 Example prompts:
 
@@ -29,6 +29,7 @@ Example prompts:
 - "Run `Scale.vi` with gain 2.5 and check `out` matches my Python reference."
 - "Make a VI that takes an array of readings and returns their sum and mean, then test it."
 - "In `Scale.vi`, also output `Gain` squared, then run it."
+- "Make a panel with a knob, a gauge, a Double button and a STOP button."
 
 ### `vi_dump` output (excerpt)
 
@@ -111,6 +112,34 @@ Wire straight across structure borders and LabVIEW adds the tunnels. For Loops b
 
 **Connector pane:** every control and indicator is wired to the standard 4x2x2x4 connector pane, so a generated VI works as a subVI right away. Inputs go on the left, outputs on the right, and `error` clusters on the bottom corners, as in NI's own VIs. To pin a slot, use `"connector": "left3"`; to leave a terminal unwired, use `"connector": false`. The tool reports the resulting layout.
 
+### User interfaces
+
+`"style"` on a control or indicator replaces it with the Controls-palette object of that name, keeping its label, terminal and wires: `"Stop Button"`, `"OK Button"`, `"Round LED"`, `"Vertical Toggle Switch"` for booleans, `"Knob"`, `"Gauge"`, `"Thermometer"`, `"Waveform Chart"` for numbers.
+
+An event structure runs one frame per user event. This spec is a panel whose **Double it** button sets `y = 2x` and whose **STOP** button ends the loop:
+
+```json
+{
+  "controls":   [{"name": "stop", "type": "bool", "label": "STOP", "style": "Stop Button"},
+                 {"name": "go", "type": "bool", "label": "Double it", "style": "OK Button"},
+                 {"name": "x", "type": "dbl", "style": "Knob"}],
+  "indicators": [{"name": "y", "type": "dbl", "style": "Gauge"}],
+  "structures": [{"name": "W", "type": "while_loop", "structures": [
+                   {"name": "E", "type": "event", "events": [
+                     {"control": "stop"},
+                     {"control": "go", "functions": [{"name": "m", "function": "Multiply"}],
+                      "constants": [{"name": "k", "type": "dbl", "value": 2}]}]}]}],
+  "wires": [["stop", "W.stop"], ["x", "m.x"], ["k", "m.y"], ["m.x*y", "y"]]
+}
+```
+
+The result follows NI's event-handler pattern:
+
+- The STOP button is read in its own Value Change frame, which stops the loop.
+- `x` and `y` are used only by the Double it frame, so their terminals are placed in that frame. The knob is therefore read when the button is pressed, not once before the loop.
+
+`"event"` defaults to `"Value Change"`. Other control events include `"Mouse Down"`, `"Mouse Up"`, `"Mouse Enter"`, `"Mouse Leave"`, and `"Key Down"`. Code in a frame can be wired to its own frame and to anything outside the event structure, except shift registers. Event structures are made by `vi_create` only, for now. `vi_run` cannot click buttons, so it stops a UI VI at its time limit.
+
 Strings are stored in the Windows ANSI code page, as LabVIEW does, so characters outside it (for example `é` on Korean Windows) become the closest match.
 
 Types: `dbl sgl i8 i16 i32 i64 u8 u16 u32 u64 bool string path error`, arrays (`"dbl[]"`, `"i32[][]"`), and clusters (`{"cluster": [{"name": "gain", "type": "dbl"}, ...]}`). Function terminals use the names shown in LabVIEW's Context Help. SubVI terminals use the subVI's control labels.
@@ -168,7 +197,8 @@ agent ──MCP/stdio──▶ labview-mcp ──ActiveX (COM)──▶ LabVIEW.
 - [x] `vi_create`: new VIs with controls, constants, functions, subVIs, and wires.
 - [x] `vi_create`: For/While loops, shift registers, case structures (boolean, integer, string), nesting.
 - [x] `vi_create`: connector pane and error clusters, so generated VIs can call each other.
-- [ ] `vi_create`: visible labels, constant widths, event structures, enums.
+- [x] `vi_create`: front-panel styles and event structures (control events) for user interfaces.
+- [ ] Event structures: Timeout, panel events (Panel Close?), event data (NewVal), editing with `vi_edit`; enums; property and invoke nodes; clicking buttons from `vi_run`.
 - [x] Helper VIs saved for LabVIEW 2015 and later.
 - [ ] Verified on LabVIEW versions older than 2026 and on localized (non-English) LabVIEW.
 

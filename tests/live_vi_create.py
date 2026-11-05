@@ -128,6 +128,34 @@ CASES = {
             {"value": "Error", "constants": [{"name": "bad", "type": "string", "value": "failed"}]}]}],
         "wires": [["ei", "C.selector"], ["ok", "t"], ["bad", "t"], ["t", "msg"]],
     }, {"error in": [True, 42, "boom"]}, {"msg": "failed"}),
+    # front-panel styles keep the label, terminal and wires
+    "styled": ({
+        "controls": [{"name": "on", "type": "bool", "label": "power", "style": "Vertical Toggle Switch"},
+                     {"name": "x", "type": "dbl", "default": 4, "style": "Knob"}],
+        "indicators": [{"name": "lamp", "type": "bool", "style": "Round LED"},
+                       {"name": "g", "type": "dbl", "label": "level", "style": "Gauge"}],
+        "functions": [{"name": "m", "function": "Multiply"}],
+        "wires": [["on", "lamp"], ["x", "m.x"], ["x", "m.y"], ["m.x*y", "g"]],
+    }, {"power": True}, {"lamp": True, "level": 16.0}),
+}
+
+# UI VIs wait for clicks, so they are checked by their structure instead of by running them.
+UI_CASES = {
+    "ui_events": ({
+        "controls": [{"name": "stop", "type": "bool", "label": "STOP", "style": "Stop Button"},
+                     {"name": "go", "type": "bool", "label": "Double it", "style": "OK Button"},
+                     {"name": "x", "type": "dbl", "default": 21}],
+        "indicators": [{"name": "y", "type": "dbl"}, {"name": "hits", "type": "i32"}],
+        "structures": [{"name": "W", "type": "while_loop", "structures": [{"name": "E", "type": "event", "events": [
+            {"control": "stop"},
+            {"control": "go", "functions": [{"name": "m", "function": "Multiply"}],
+             "constants": [{"name": "k", "type": "dbl", "value": 2}]},
+            {"control": "y", "event": "Mouse Down", "functions": [{"name": "inc", "function": "Increment"}]}]}]}],
+        "wires": [["stop", "W.stop"], ["x", "m.x"], ["k", "m.y"], ["m.x*y", "y"],
+                  ["W.i", "inc.x"], ["inc.x+1", "hits"]],
+    }, {  # where each front-panel terminal must end up: "" = top level, k = event frame k
+        "STOP": 0, "Double it": None, "x": 1, "y": 1, "hits": 2},
+        ['[0] "STOP": Value Change', '[1] "Double it": Value Change', '[2] "y": Mouse Down']),
 }
 
 
@@ -139,9 +167,47 @@ def _fill(o):
     return o.replace("{D}", D) if isinstance(o, str) else o
 
 
-names = sys.argv[1:] or list(CASES)
+def ui_case(name):
+    spec, where, frames = UI_CASES[name]
+    p = os.path.join(D, name + ".vi")
+    res = lv.call(lv.vi_create, p, spec, True, "").result()
+    problems = []
+    if res["exec_state"] != "idle":
+        problems.append(f"state {res['exec_state']}")
+    if res.get("event_frames", {}).get("E") != frames:
+        problems.append(f"frames {res.get('event_frames')}")
+    g = lv.call(lv.vi_dump, p, "scan").result()
+    ev = next(n for n in g["nodes"] if n["kind"] == "event_structure")
+    if len(ev.get("frames", [])) != len(frames):
+        problems.append(f"{len(ev.get('frames', []))} frames in the VI")
+    term_in = {n["label"]: n.get("in", "") for n in g["nodes"] if n["kind"] in ("control", "indicator")}
+    for label, k in where.items():
+        want = f"{ev['id']}#{k}" if k is not None else None
+        if want and term_in.get(label) != want:
+            problems.append(f"{label} is in {term_in.get(label)!r}, expected {want!r}")
+    # The "Double it" button has no wires; its terminal still goes into its own frame (latch reset).
+    if term_in.get("Double it") != f"{ev['id']}#1":
+        problems.append(f"Double it is in {term_in.get('Double it')!r}")
+    return problems
+
+
+names = sys.argv[1:] or list(CASES) + list(UI_CASES)
 failed = 0
 for name in names:
+    if name in UI_CASES:
+        try:
+            problems = ui_case(name)
+        except Exception as e:
+            problems = [f"error: {str(e)[:300]}"]
+        failed += bool(problems)
+        print(f"{'FAIL' if problems else 'PASS'} {name}: {problems or 'structure as expected'}")
+        try:
+            _, imgs = lv.call(lv.vi_snapshot, os.path.join(D, name + ".vi"), True, True, True, False).result()
+            for i in imgs:
+                shutil.copy(i, os.path.join(D, f"{name}.{i.name}"))
+        except Exception:
+            pass
+        continue
     spec, inputs, expect = CASES[name]
     spec = _fill(spec)
     p = os.path.join(D, name + ".vi")

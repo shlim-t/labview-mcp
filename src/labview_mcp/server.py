@@ -195,18 +195,41 @@ async def vi_create(
     bottom, in spec order). Pin a slot with "connector": "left3" (left0-3, top0-1, bottom0-1,
     right0-3) or leave one off with "connector": false. LabVIEW convention: error in at left3,
     error out at right3; type "error" is an error cluster.
+    Front-panel look: "style" on a control/indicator replaces it with that Controls-palette object of
+    the same data type: bool "Stop Button", "OK Button", "Round LED", "Vertical Toggle Switch"; numeric
+    "Knob", "Gauge", "Thermometer", "Vertical Pointer Slide", "Waveform Chart" (dbl indicator).
+    User interfaces: an event structure, usually inside a while loop, runs one frame per user event:
+      {"name": "E", "type": "event", "events": [
+          {"control": "stop"},                                   # "event" defaults to "Value Change"
+          {"control": "go", "event": "Value Change", "functions": [...], ...contents}]}
+    "control" names a control/indicator of the spec. Other events: "Mouse Down", "Mouse Up",
+    "Mouse Enter", "Mouse Leave", "Key Down", ... Code in a frame may be wired to code in the same
+    frame and to objects outside the event structure (not to shift registers). A front-panel terminal
+    used by only one frame is placed in it (read when the event happens), and [button, "W.stop"]
+    reads the button in its own frame and stops the loop W, as in NI's templates. Example:
+      {"controls": [{"name": "stop", "type": "bool", "style": "Stop Button"},
+                    {"name": "go", "type": "bool", "label": "Double it", "style": "OK Button"},
+                    {"name": "x", "type": "dbl", "style": "Knob"}],
+       "indicators": [{"name": "y", "type": "dbl", "style": "Gauge"}],
+       "structures": [{"name": "W", "type": "while_loop", "structures": [{"name": "E", "type": "event",
+           "events": [{"control": "stop"}, {"control": "go", "functions": [{"name": "m",
+           "function": "Multiply"}], "constants": [{"name": "k", "type": "dbl", "value": 2}]}]}]}],
+       "wires": [["stop", "W.stop"], ["x", "m.x"], ["k", "m.y"], ["m.x*y", "y"]]}
+    vi_run cannot press buttons, so a UI VI runs until vi_run's time limit stops it.
     The diagram is tidied with LabVIEW's Clean Up Diagram."""
     res = await _run(lv.vi_create, path, spec, overwrite, description)
-    text, imgs = await _run(lv.vi_snapshot, res["path"], False, True, False, False)
+    ui = bool(res.get("event_frames") or res.get("styled"))
+    text, imgs = await _run(lv.vi_snapshot, res["path"], ui, True, bool(res.get("event_frames")), False)
     out: list[Any] = [
         f"Created {res['path']} (state: {res['exec_state']}).\n"
         f"Front panel: {res['front_panel']}\n"
         f"Connector pane (callers wire these labels): {res['connector_pane']}\n"
+        + (f"Event frames: {res['event_frames']}\n" if res.get("event_frames") else "")
         + (f"WARNING: {res['warning']}\n" if res.get("warning") else "")
-        + "Check the diagram picture: a wire that LabVIEW could not connect is simply missing. "
-        "Then call vi_run to test."
+        + "Check the pictures (the front panel, the diagram, and each event frame): a wire that "
+        "LabVIEW could not connect is simply missing. Then call vi_run to test."
     ]
-    for p in imgs[:1]:
+    for p in imgs[:8]:
         out.append(_image(p, 2000))
     return out
 
