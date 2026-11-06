@@ -283,6 +283,21 @@ HELPERS["lvmcp_outcnt"] = {
     "nodes": [{"name": "w", "kind": "property", "class": "NamedUnbundler", "items": ["OutputCnt"], "write": True}],
     "wires": [("reference", "w.reference"), ("count", "w.OutputCnt"), ("w.error out", "error out")],
 }
+# Constant.Value / Control.Value as flattened type + data: the type of a constant or front-panel
+# control (vi_dump's scan reader has no other way to learn it)
+def _typeof_helper(cls: str) -> dict:
+    return {
+        "controls": [("reference", f"ref:{cls}")],
+        "indicators": [("type string", "i16[]"), ("data string", "string"), ("error out", "error")],
+        "nodes": [{"name": "p", "kind": "property", "class": cls, "items": ["Value"]},
+                  {"name": "v", "kind": "function", "function": "Variant To Flattened String"}],
+        "wires": [("reference", "p.reference"), ("p.Value", "v.Variant"), ("v.type string", "type string"),
+                  ("v.data string", "data string"), ("p.error out", "error out")],
+    }
+
+
+HELPERS["lvmcp_consttype"] = _typeof_helper("Constant")
+HELPERS["lvmcp_ctltype"] = _typeof_helper("Control")
 # EventStructure.Timeout Terminal: the terminal to wire the timeout (ms) to
 HELPERS["lvmcp_timeoutterm"] = {
     "controls": [("reference", "ref:EventStructure")],
@@ -299,7 +314,7 @@ HELPERS["lvmcp_eventsel"] = {
 }
 
 ORDER = ["lvmcp_move", "lvmcp_propwrite", "lvmcp_proplink", "lvmcp_invokelink", "lvmcp_uid", "lvmcp_classname",
-         "lvmcp_allprops", "lvmcp_signal", "lvmcp_fire", "lvmcp_timeoutterm", "lvmcp_eventsel", "lvmcp_termconst", "lvmcp_outcnt"]
+         "lvmcp_allprops", "lvmcp_signal", "lvmcp_fire", "lvmcp_timeoutterm", "lvmcp_eventsel", "lvmcp_termconst", "lvmcp_outcnt", "lvmcp_consttype", "lvmcp_ctltype"]
 
 
 def main(args: list[str]) -> None:

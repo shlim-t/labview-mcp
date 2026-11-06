@@ -1354,7 +1354,32 @@ class LabVIEW:
             lab.SetControlValue("GObject", ref)
             lab.Run(False)
             labels[r.uid] = lab.GetControlValue("Object Label")
-        return scan.build(rows, labels)
+        g = scan.build(rows, labels)
+        _try(lambda: self._scan_types(target, g, dict(zip((r.uid for r in rows), cols[6]))))
+        return g
+
+    def _scan_types(self, target, g: dict, refs: dict) -> None:
+        """Data types of constants and front-panel terminals, from their values' flattened type."""
+        from . import td
+        ct, ft = self._helper(CONSTTYPE_VI), self._helper(CTLTYPE_VI)
+        fp = None
+        for n in g["nodes"]:
+            if n["kind"] == "constant" and n.get("uid") in refs:
+                h, ref = ct, refs[n["uid"]]
+            elif n["kind"] in ("control", "indicator") and n.get("label"):
+                fp = fp if fp is not None else self._fp_refs_by_label(target)
+                h, ref = ft, fp.get(n["label"])
+            else:
+                continue
+            if ref is None:
+                continue
+            h.SetControlValue("reference", ref)
+            h.Run(False)
+            if h.GetControlValue("error out")[0]:
+                continue
+            t = _try(lambda: td.from_flattened(h.GetControlValue("type string")))
+            if t is not None:
+                n["type"] = t
 
 
 # Helper VIs; LVMCP_VIS_DIR points at another copy (used to test copies saved for older LabVIEW).
@@ -1383,6 +1408,8 @@ TIMEOUTTERM_VI = VIS_DIR / "lvmcp_timeoutterm.vi"
 EVENTSEL_VI = VIS_DIR / "lvmcp_eventsel.vi"
 TERMCONST_VI = VIS_DIR / "lvmcp_termconst.vi"
 OUTCNT_VI = VIS_DIR / "lvmcp_outcnt.vi"
+CONSTTYPE_VI = VIS_DIR / "lvmcp_consttype.vi"
+CTLTYPE_VI = VIS_DIR / "lvmcp_ctltype.vi"
 _STD_TERMS = {"reference", "reference out", "error in (no error)", "error out"}
 _ANY_STYLE = 4294967295  # GObject.Replace "Style": -1 as U32, find the object by its palette name
 _REMOVE_CORE = Path("vi.lib") / "Utility" / "QuickDropSupport" / "Remove and Rewire Objects_core.vi"

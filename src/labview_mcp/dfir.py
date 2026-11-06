@@ -205,7 +205,11 @@ _NODE_NAMES = {"ConcatenateNode": "Concatenate Strings", "BuildArrayNode": "Buil
                "UnbundleNode": "Unbundle", "BundleNode": "Bundle", "PrintfNode": "Format Into String",
                "UnbundleByNameNode": "Unbundle By Name", "BundleByNameNode": "Bundle By Name",
                "IndexArrayNode": "Index Array", "ScanfNode": "Scan From String",
-               "CompoundArithmeticNode": "Compound Arithmetic", "MergeErrorsNode": "Merge Errors"}
+               "CompoundArithmeticNode": "Compound Arithmetic", "MergeErrorsNode": "Merge Errors",
+               "ArrayIndexNode": "Index Array", "DeleteArrayNode": "Delete From Array",
+               "ReplaceArrayNode": "Replace Array Subset", "ArraySubsetNode": "Array Subset",
+               "InsertIntoArrayNode": "Insert Into Array", "RandomNumber0To1Primitive": "Random Number (0-1)",
+               "GetDateOrTimeInSecondsPrimitive": "Get Date/Time In Seconds"}
 # Growable nodes: DFIR terminal i is what vi_create calls element[i].
 _GROWABLE = {"ConcatenateNode", "BuildArrayNode", "UnbundleNode", "BundleNode"}
 _PRINTF = ["format string", "initial string", "resulting string", "error in", "error out"]
@@ -222,8 +226,8 @@ def _short(ref: str) -> str:
 
 def _palette_name(cls: str, catalog: dict[str, list[str]]) -> str | None:
     base = cls[:-len("Primitive")] if cls.endswith("Primitive") else cls
-    words = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", base)
-    cands = [words]
+    words = re.sub(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[a-z])(?=[0-9])", " ", base)
+    cands = [words, words.replace(" Or ", "/"), words.replace("Fixed Point", "Fixed-Point")]
     if words.startswith("Is "):
         cands.append(words[3:] + "?")
     cands += [c.replace(" And ", " & ") for c in list(cands)]
