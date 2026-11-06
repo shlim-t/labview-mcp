@@ -337,6 +337,41 @@ HELPERS["lvmcp_subvipath"] = {
     "nodes": [{"name": "p", "kind": "property", "class": "SubVI", "items": ["VIPath"]}],
     "wires": [("reference", "p.reference"), ("p.VIPath", "path"), ("p.error out", "error out")],
 }
+# Control.Label -> Text.Text (write): rename a front-panel control or indicator (vi_edit "rename")
+HELPERS["lvmcp_relabel"] = {
+    "controls": [("reference", "ref:Control"), ("text", "string")],
+    "indicators": [("error out", "error")],
+    "nodes": [{"name": "c", "kind": "property", "class": "Control", "items": ["Label"]},
+              {"name": "t", "kind": "property", "class": "Text", "items": ["Text"], "write": True}],
+    "wires": [("reference", "c.reference"), ("c.Label", "t.reference"), ("text", "t.Text"),
+              ("c.error out", "t.error in (no error)"), ("t.error out", "error out")],
+}
+# Constant.Value (write), the value flattened as for lvmcp_signal (vi_edit "values")
+HELPERS["lvmcp_constvalue"] = {
+    "controls": [("reference", "ref:Constant"), ("type string", "string"), ("data string", "string")],
+    "indicators": [("error out", "error")],
+    "nodes": [{"name": "i16", "kind": "constant", "type": "i16[]", "value": []},
+              {"name": "tc", "kind": "function", "function": "Type Cast"},
+              {"name": "fs", "kind": "function", "function": "Flattened String To Variant"},
+              {"name": "s", "kind": "property", "class": "Constant", "items": ["Value"], "write": True}],
+    "wires": [("type string", "tc.x"), ("i16", "tc.type"), ("tc.*(type *) &x", "fs.type string"),
+              ("data string", "fs.data string"), ("fs.Variant", "s.Value"), ("reference", "s.reference"),
+              ("fs.error out", "s.error in (no error)"), ("s.error out", "error out")],
+}
+# Numeric.Representation / NumericConstant.Representation (write): change a number's type (vi_edit "retype")
+HELPERS["lvmcp_rep"] = {
+    "controls": [("reference", "ref:Numeric"), ("representation", "u16")],
+    "indicators": [("error out", "error")],
+    "nodes": [{"name": "w", "kind": "property", "class": "Numeric", "items": ["Rep"], "write": True}],
+    "wires": [("reference", "w.reference"), ("representation", "w.Rep"), ("w.error out", "error out")],
+}
+HELPERS["lvmcp_constrep"] = {
+    "controls": [("reference", "ref:NumericConstant"), ("representation", "u16")],
+    "indicators": [("error out", "error")],
+    "nodes": [{"name": "w", "kind": "property", "class": "NumericConstant", "items": ["Representation"],
+               "write": True}],
+    "wires": [("reference", "w.reference"), ("representation", "w.Representation"), ("w.error out", "error out")],
+}
 # EventStructure.Timeout Terminal: the terminal to wire the timeout (ms) to
 HELPERS["lvmcp_timeoutterm"] = {
     "controls": [("reference", "ref:EventStructure")],
@@ -353,7 +388,8 @@ HELPERS["lvmcp_eventsel"] = {
 }
 
 ORDER = ["lvmcp_move", "lvmcp_propwrite", "lvmcp_proplink", "lvmcp_invokelink", "lvmcp_uid", "lvmcp_classname",
-         "lvmcp_allprops", "lvmcp_signal", "lvmcp_fire", "lvmcp_timeoutterm", "lvmcp_eventsel", "lvmcp_termconst", "lvmcp_outcnt", "lvmcp_consttype", "lvmcp_ctltype", "lvmcp_termind", "lvmcp_conpane", "lvmcp_subvipath"]
+         "lvmcp_allprops", "lvmcp_signal", "lvmcp_fire", "lvmcp_timeoutterm", "lvmcp_eventsel", "lvmcp_termconst", "lvmcp_outcnt", "lvmcp_consttype", "lvmcp_ctltype", "lvmcp_termind", "lvmcp_conpane", "lvmcp_subvipath", "lvmcp_relabel", "lvmcp_constvalue",
+         "lvmcp_rep", "lvmcp_constrep"]
 
 
 def main(args: list[str]) -> None:

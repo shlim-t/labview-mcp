@@ -307,6 +307,14 @@ async def vi_edit(
           {"node": "multiply_7"}         a vi_dump node (function, subVI, constant, loop, case)
           {"node": "for_loop_3", "functions": [...], ...}       new code inside an existing loop
           {"node": "case_structure_5", "cases": {"1": {...}}}   new code inside case frame 1
+      "rename": {"Gain": "Gain (dB)"}  relabel front-panel controls/indicators
+      "values": {"Gain": 2.5, "constant_6": 10}   a control's default value (by label) or a
+                                       constant's value (vi_dump id)
+      "retype": {"Count": "i32", "constant_6": "u8"}   change a number's type (control or constant)
+      "disconnect": ["out_12", "multiply_7.x"]   cut the wire into these vi_dump wire ends (a
+                                       wire's other branches stay); then wire a new source in "wires":
+          {"disconnect": ["x2_5"], "existing": {"a": {"node": "add_8"}, "o": "x2"},
+           "wires": [["a.x+y", "o"]]}
     Existing nodes are wired like new ones ("m.x", "L.i", "C.selector"). Code put in a case frame
     may only be wired to code in that frame and to existing objects; crossing the border makes a
     tunnel. Example, replace out = x + 1 with out = x * 3:

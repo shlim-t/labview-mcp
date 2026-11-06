@@ -910,6 +910,18 @@ class LabVIEW:
         remove = spec.get("remove") or []
         if not isinstance(remove, list) or not all(isinstance(r, str) for r in remove):
             raise LabVIEWError("\"remove\" is a list of vi_dump node ids, e.g. [\"multiply_18\"]")
+        rename, values, retype = (spec.get(k) or {} for k in ("rename", "values", "retype"))
+        disconnect = spec.get("disconnect") or []
+        for k, v in (("rename", rename), ("values", values), ("retype", retype)):
+            if not isinstance(v, dict):
+                raise LabVIEWError(f"\"{k}\" maps a front-panel label (or a vi_dump constant id) to "
+                                   + {"rename": "its new label", "values": "a value",
+                                      "retype": "a numeric type, e.g. \"i32\""}[k])
+        for t in retype.values():
+            if t not in _REPRESENTATION:
+                raise LabVIEWError(f"retype: {t!r} is not a numeric type; one of {sorted(_REPRESENTATION)}")
+        if not isinstance(disconnect, list) or not all(isinstance(e, str) for e in disconnect):
+            raise LabVIEWError("\"disconnect\" lists wire ends from vi_dump, e.g. [\"multiply_7.x\", \"out_12\"]")
         self._uid_refs = {}
         target = self._vi(path)
         target._FlagAsMethod("SaveInstrument")
@@ -919,9 +931,31 @@ class LabVIEW:
 
         # Resolve every reference to the VI's current objects before touching anything.
         graph = None
-        if remove or any(isinstance(v, dict) and ("node" in v or "uid" in v) for v in existing_map.values()):
+        if remove or disconnect or any(isinstance(v, dict) and ("node" in v or "uid" in v)
+                                       for v in existing_map.values()) or \
+                any(not self._is_label(k, target) for k in [*values, *retype]):
             graph = self.vi_dump(path)
         by_id = {n["id"]: n for n in (graph or {}).get("nodes", [])}
+        cut_wires, cut_sinks = [], 0  # wires deleted by "disconnect" and the ends they had
+        if disconnect:
+            spec = dict(spec)
+            existing_map = dict(existing_map)
+            spec["wires"] = list(spec.get("wires") or [])
+            for e in disconnect:
+                w = next((w for w in graph["wires"] if e in w["to"]), None) or \
+                    next((w for w in graph["wires"] if w["from"] == e), None)
+                if w is None:
+                    raise LabVIEWError(f"disconnect: no wire ends at {e!r}. Wire ends in vi_dump: "
+                                       f"{sorted({x for w in graph['wires'] for x in w['to']})[:40]}")
+                if w.get("uid") is None or w["uid"] in cut_wires:
+                    continue
+                cut_wires.append(w["uid"])
+                cut_sinks += len(w["to"])
+                # a wire is one object with all its branches: re-make the branches that stay
+                keep = [t for t in w["to"] if t not in disconnect] if e in w["to"] else []
+                for t in keep:
+                    spec["wires"].append([self._bind_end(w["from"], by_id, existing_map),
+                                          self._bind_end(t, by_id, existing_map)])
 
         def node_of(key, where):
             if key not in by_id:
@@ -1005,7 +1039,8 @@ class LabVIEW:
                                    "vi_dump's \"frames\")")
 
         (fpw, fph), (bdw, bdh) = self._content_size(path)
-        main_spec = {k: v for k, v in spec.items() if k not in ("existing", "remove")}
+        main_spec = {k: v for k, v in spec.items()
+                     if k not in ("existing", "remove", "rename", "values", "retype", "disconnect")}
         main_spec["wires"] = main_wires
         script = gen.build(main_spec,
                            existing=[{"name": b[0], "kind": b[1], "spec": b[3]} for b in bindings],
@@ -1024,8 +1059,19 @@ class LabVIEW:
             bdir.mkdir(exist_ok=True)
             bak = bdir / f"{Path(path).stem}.{time.strftime('%Y%m%d-%H%M%S')}{Path(path).suffix}"
             shutil.copy2(path, bak)
+        # the file as it was, to put back if the edit only shows as broken once saved
+        pristine = self._scratch("edit") / Path(path).name
+        shutil.copy2(path, pristine)
 
         removed = 0
+        if cut_wires:
+            try:
+                wires = self._uid_map(target, "Wire")
+                self._delete(target, [wires[u] for u in cut_wires if u in wires])
+            except LabVIEWError as e:
+                _try(lambda: target.Revert())
+                raise LabVIEWError(f"{e} The VI was reverted.") from None
+            self._uid_refs = {}
         if remove_nodes:
             gone = {n["id"] for n in remove_nodes}
 
@@ -1108,9 +1154,14 @@ class LabVIEW:
             except LabVIEWError as e:
                 _try(lambda: target.Revert())
                 raise LabVIEWError(f"{e} The VI was reverted and not saved.") from None
-        broken = target.ExecState == 0
-        after = self._sink_count(path)
-        n_wires = len(script.wires) + sum(len(fs[3].wires) for fs in frame_scripts)
+        try:
+            changed = self._edit_objects(target, by_id, rename, values, retype)
+        except LabVIEWError as e:
+            _try(lambda: target.Revert())
+            raise LabVIEWError(f"{e} The VI was reverted and not saved.") from None
+        after = self._sink_count(path)  # compiles the diagram, which also refreshes ExecState
+        broken = self._still_broken(target)
+        n_wires = len(script.wires) + sum(len(fs[3].wires) for fs in frame_scripts) - cut_sinks
         if not broken and before is not None and after is not None and after - before < n_wires:
             # LabVIEW drops a wire it cannot make (e.g. a second source into a wired indicator)
             # without an error; the dangling remains would be saved.
@@ -1119,6 +1170,22 @@ class LabVIEW:
                 f"LabVIEW connected only {after - before} of the {n_wires} requested wires "
                 "(a wire into an input that is already wired, or between incompatible terminals, is "
                 "silently dropped). The VI was reverted and not saved. Check the spec with vi_dump.")
+        if broken and (cut_wires or remove_nodes):
+            # After deleting objects LabVIEW keeps reporting "broken" until the VI is saved; save,
+            # then judge (and put the original file back if it really is broken).
+            target.SaveInstrument(path, False, False)
+            # LabVIEW rechecks the VI only once the references this edit holds are released
+            target = refs = ref_of = items = None
+            self._uid_refs = {}
+            import gc
+            gc.collect()
+            target = self._vi(path)
+            target._FlagAsMethod("SaveInstrument")
+            target._FlagAsMethod("Revert")
+            broken = self._still_broken(target, 1.0)
+            if broken and not allow_broken:
+                shutil.copy2(pristine, path)
+                _try(lambda: target.Revert())
         if broken and not allow_broken:
             _try(lambda: target.Revert())
             raise LabVIEWError(
@@ -1133,7 +1200,97 @@ class LabVIEW:
         target.SaveInstrument(path, False, False)
         return {"path": path, "backup": str(bak) if bak else None,
                 "exec_state": EXEC_STATES.get(target.ExecState, target.ExecState),
-                "removed": removed, "added_front_panel": script.labels}
+                "removed": removed, "added_front_panel": script.labels,
+                **({"disconnected": len(cut_wires)} if cut_wires else {}), **changed}
+
+    @staticmethod
+    def _still_broken(vi, wait_s: float = 3.0) -> bool:
+        """ExecState can read "broken" for a moment after an edit (deleted wires, then new code)
+        until LabVIEW has rechecked the diagram, so a broken result is confirmed by waiting."""
+        t0 = time.monotonic()
+        while vi.ExecState == 0:
+            if time.monotonic() - t0 > wait_s:
+                return True
+            time.sleep(0.2)
+        return False
+
+    def _is_label(self, key: str, target) -> bool:
+        """A front-panel label of the VI (else a vi_dump node id)."""
+        cache = self.__dict__.setdefault("_label_cache", {})
+        k = id(target)
+        if k not in cache:
+            cache.clear()
+            cache[k] = set(self._fp_refs_by_label(target))
+        return key in cache[k]
+
+    @staticmethod
+    def _bind_end(end: str, by_id: dict, existing_map: dict) -> str:
+        """A vi_dump wire end as a vi_edit spec end, binding its node under a generated name."""
+        node, _, term = end.partition(".")
+        n = by_id.get(node)
+        if n is None or n["kind"] in ("tunnel", "shift_register", "shift_register_left",
+                                      "shift_register_right") or "[" in end:
+            raise LabVIEWError(f"disconnect: the wire also goes to {end!r}, which vi_edit cannot re-wire "
+                               "(a tunnel or shift register). Remove and re-make that code instead.")
+        name = "_w_" + "".join(ch if ch.isalnum() else "_" for ch in node)
+        existing_map.setdefault(name, n["label"] if n["kind"] in ("control", "indicator") else {"node": node})
+        return f"{name}.{term}" if term else name
+
+    def _edit_objects(self, target, by_id: dict, rename: dict, values: dict, retype: dict) -> dict:
+        """vi_edit "rename" / "values" / "retype" on front-panel objects (by label) and constants
+        (by vi_dump id)."""
+        from win32com.client import VARIANT
+        from . import gen
+        done: dict = {}
+        if not (rename or values or retype):
+            return done
+        fp = self._fp_refs_by_label(target)
+        arr = pythoncom.VT_ARRAY | pythoncom.VT_UI1
+
+        def const_ref(key, what):
+            n = by_id.get(key)
+            if n is None or n["kind"] != "constant" or "uid" not in n:
+                raise LabVIEWError(f"{what}: {key!r} is neither a front-panel label ({sorted(k for k in fp if k)}) "
+                                   "nor a vi_dump constant id")
+            return n, self._ref_for_uid(target, n["uid"], "constant")
+        for key, t in retype.items():  # first, so "values" can use the new type
+            if key in fp:
+                h, ref = self._helper(REP_VI), fp[key]
+            else:
+                h, ref = self._helper(CONSTREP_VI), const_ref(key, "retype")[1]
+                by_id[key] = dict(by_id[key], type=t)
+            h.SetControlValue("reference", ref)
+            h.SetControlValue("representation", _REPRESENTATION[t])
+            self._run_checked(h, f"retype {key!r} (only numbers can be retyped)")
+        for key, v in values.items():
+            if key in fp:
+                target.SetControlValue(key, v)
+                target._FlagAsMethod("MakeCurValueDefault")
+                target.MakeCurValueDefault()
+                continue
+            n, ref = const_ref(key, "values")
+            try:
+                lt = gen.parse_type(n.get("type"))
+                ts, ds = lt.td(), lt.data(lt.enum_index(v) if lt.kind == "enum" else v)
+            except (gen.SpecError, TypeError, ValueError) as e:
+                raise LabVIEWError(f"values: cannot set {key!r} (type {n.get('type')!r}) to {v!r}: {e}") from None
+            h = self._helper(CONSTVALUE_VI)
+            h.SetControlValue("reference", ref)
+            h.SetControlValue("type string", VARIANT(arr, ts))
+            h.SetControlValue("data string", VARIANT(arr, ds))
+            self._run_checked(h, f"setting the value of {key!r}")
+        for old, new in rename.items():  # last: the other edits find objects by their old labels
+            if old not in fp:
+                raise LabVIEWError(f"rename: no control or indicator labelled {old!r}; labels: "
+                                   f"{sorted(k for k in fp if k)}")
+            h = self._helper(RELABEL_VI)
+            h.SetControlValue("reference", fp[old])
+            h.SetControlValue("text", str(new))
+            self._run_checked(h, f"renaming {old!r}")
+        for k, v in (("renamed", rename), ("values_set", values), ("retyped", retype)):
+            if v:
+                done[k] = sorted(v)
+        return done
 
     def _uid_map(self, vi, cls: str, fresh: bool = False) -> dict:
         """uid -> GObject refnum for every block-diagram object of a VI Server class (also works on
@@ -1442,6 +1599,13 @@ CONSTTYPE_VI = VIS_DIR / "lvmcp_consttype.vi"
 CTLTYPE_VI = VIS_DIR / "lvmcp_ctltype.vi"
 CONPANE_VI = VIS_DIR / "lvmcp_conpane.vi"
 SUBVIPATH_VI = VIS_DIR / "lvmcp_subvipath.vi"
+RELABEL_VI = VIS_DIR / "lvmcp_relabel.vi"
+CONSTVALUE_VI = VIS_DIR / "lvmcp_constvalue.vi"
+REP_VI = VIS_DIR / "lvmcp_rep.vi"
+CONSTREP_VI = VIS_DIR / "lvmcp_constrep.vi"
+# Numeric.Representation values (measured on LabVIEW 2026 by setting each and reading the type back)
+_REPRESENTATION = {"ext": 0, "dbl": 1, "sgl": 2, "i32": 3, "i16": 4, "i8": 5, "u32": 6, "u16": 7, "u8": 8,
+                   "cxt": 9, "cdb": 10, "csg": 11, "i64": 12, "u64": 13}
 _STD_TERMS = {"reference", "reference out", "error in (no error)", "error out"}
 _ANY_STYLE = 4294967295  # GObject.Replace "Style": -1 as U32, find the object by its palette name
 _REMOVE_CORE = Path("vi.lib") / "Utility" / "QuickDropSupport" / "Remove and Rewire Objects_core.vi"

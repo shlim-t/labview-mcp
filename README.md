@@ -4,7 +4,7 @@ An [MCP](https://modelcontextprotocol.io) server that lets AI coding agents — 
 
 LabVIEW source code is a binary, graphical format. Text-based coding agents can't open a `.vi` file. labview-mcp acts as the agent's eyes and hands: it drives your installed LabVIEW over its ActiveX server and returns what the agent needs as text, images, and values.
 
-> Status: **v0.17.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth, and **user interfaces**: front-panel styles (buttons, LEDs, knobs, gauges, charts), event structures (control and VI events, Timeout, event data), and Property and Invoke Nodes. Any existing VI can be read as a graph (`vi_dump`) and changed in place (`vi_edit`: remove, replace, and add code, including inside existing loops and case frames). **Projects and builds**: the agent can put VIs in a project, add application (EXE), packed-library, and source-distribution build specs, build them, and mass compile folders.
+> Status: **v0.18.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth, and **user interfaces**: front-panel styles (buttons, LEDs, knobs, gauges, charts), event structures (control and VI events, Timeout, event data), and Property and Invoke Nodes. Any existing VI can be read as a graph (`vi_dump`) and changed in place (`vi_edit`: remove, replace, and add code, including inside existing loops and case frames). **Projects and builds**: the agent can put VIs in a project, add application (EXE), packed-library, and source-distribution build specs, build them, and mass compile folders.
 
 ## What the agent can do
 
@@ -73,6 +73,15 @@ This spec replaces `out = x + 1` with `out = x * 3`:
  "functions": [{"name": "m", "function": "Multiply"}],
  "wires":     [["x", "m.x"], ["k", "m.y"], ["m.x*y", "o"]]}
 ```
+
+Small changes need no new code:
+
+| Key | Example | Effect |
+|---|---|---|
+| `"rename"` | `{"Gain": "Gain (dB)"}` | Relabels front-panel controls and indicators. |
+| `"values"` | `{"Gain": 2.5, "constant_6": 10}` | Sets a control's default value (by label) or a constant's value (by `vi_dump` id). |
+| `"retype"` | `{"Count": "i32", "constant_6": "u8"}` | Changes the numeric type of a control or a constant. |
+| `"disconnect"` | `["x2_5", "multiply_7.x"]` | Cuts the wire into these `vi_dump` wire ends. The wire's other branches stay. Wire a new source in `"wires"`. |
 
 Objects are matched by their LabVIEW UID, which `vi_dump` reports. Edits therefore hit exactly the node you named, even in a VI with many identical functions.
 
@@ -290,7 +299,8 @@ agent ──MCP/stdio──▶ labview-mcp ──ActiveX (COM)──▶ LabVIEW.
 - [x] `vi_dump`: block-diagram graph (nodes, wires, constants) as JSON.
 - [x] `vi_edit`: add code wired to an existing VI's controls and indicators, with backup and revert.
 - [x] `vi_edit`: remove and replace nodes; add code inside existing loops and case frames.
-- [ ] `vi_edit`: rename, move, and retype existing objects; add frames to cases.
+- [x] `vi_edit`: rename controls, set constant and default values, retype numbers, cut and re-make wires.
+- [ ] `vi_edit`: move objects, add and remove case frames, wrap code in a loop.
 - [x] `vi_dump` for any VI (scan fallback), including broken ones and VIs with property nodes and event structures.
 - [ ] `vi_diff`: a semantic diff between two versions of a VI, for code review on binary files.
 - [x] Projects: create, add files and build specs (EXE, packed library, source distribution), build, mass compile.

@@ -180,5 +180,38 @@ call(lv.vi_edit, pe, {"existing": {"x": "x"},
 vals = call(lv.vi_run, pe, {"x": 2}, [], 10)["values"]
 check("edit adds a property node", vals.get("default of x") == 7.0 and vals.get("y") == 2.0, vals)
 
+# 3-A basic edits on y = x * k + b:
+be = os.path.join(D, "basic_edit.vi")
+call(lv.vi_create, be, {"controls": [{"name": "x", "type": "dbl", "default": 2}, {"name": "b", "type": "dbl"}],
+                        "indicators": [{"name": "y", "type": "dbl"}, {"name": "x2", "type": "dbl"}],
+                        "constants": [{"name": "k", "type": "dbl", "value": 3}],
+                        "functions": [{"name": "m", "function": "Multiply"}, {"name": "a", "function": "Add"}],
+                        "wires": [["x", "m.x"], ["k", "m.y"], ["m.x*y", "a.x"], ["b", "a.y"], ["a.x+y", "y"],
+                                  ["x", "x2"]]}, True, "")
+g = call(lv.vi_dump, be)
+kid = next(n["id"] for n in g["nodes"] if n["kind"] == "constant")
+# rename a control, change a constant's value and a control's default
+r = call(lv.vi_edit, be, {"rename": {"x": "input"}, "values": {kid: 10, "b": 0.5}}, False, False)
+vals = call(lv.vi_run, be, {}, [], 10)["values"]
+check("rename + values", vals.get("y") == 20.5 and "input" in vals and "x" not in vals, (r, vals))
+# retype a control and a constant
+call(lv.vi_edit, be, {"retype": {"b": "i32", kid: "i32"}}, False, False)
+g = call(lv.vi_dump, be)
+types = {n.get("label", n["id"]): n.get("type") for n in g["nodes"] if n["kind"] in ("control", "constant")}
+check("retype", types.get("b") == "i32" and types.get(kid) == "i32", types)
+# disconnect: x2 shows Add's output instead of x; the x -> Multiply branch of that wire stays
+mul = next(n["id"] for n in g["nodes"] if n.get("function") == "Multiply")
+add = next(n["id"] for n in g["nodes"] if n.get("function") == "Add")
+x2 = next(n["id"] for n in g["nodes"] if n.get("label") == "x2")
+r = call(lv.vi_edit, be, {"disconnect": [x2], "existing": {"a": {"node": add}, "o": "x2"},
+                          "wires": [["a.x+y", "o"]]}, False, False)
+vals = call(lv.vi_run, be, {"input": 1, "b": 2}, [], 10)["values"]
+check("disconnect + rewire", vals.get("x2") == vals.get("y") == 12.0, (r, vals))
+try:
+    call(lv.vi_edit, be, {"disconnect": [f"{mul}.nope"]}, False, False)
+    check("disconnect unknown end refused", False)
+except LabVIEWError as e:
+    check("disconnect unknown end refused", "no wire ends" in str(e), str(e)[:80])
+
 print(f"{'all passed' if not failed else f'{failed} failed'}; files in {D}")
 sys.exit(1 if failed else 0)
