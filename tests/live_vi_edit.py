@@ -213,5 +213,44 @@ try:
 except LabVIEWError as e:
     check("disconnect unknown end refused", "no wire ends" in str(e), str(e)[:80])
 
+# 3-B structural edits
+cs = os.path.join(D, "cases.vi")
+call(lv.vi_create, cs, {"controls": [{"name": "n", "type": "i32"}], "indicators": [{"name": "o", "type": "string"}],
+                        "structures": [{"name": "C", "type": "case", "output_tunnels": ["t"], "cases": [
+                            {"value": 0, "default": True, "constants": [{"name": "a", "type": "string", "value": "zero"}]},
+                            {"value": 1, "constants": [{"name": "b", "type": "string", "value": "one"}]},
+                            {"value": 2, "constants": [{"name": "c", "type": "string", "value": "two"}]}]}],
+                        "wires": [["n", "C.selector"], ["a", "t"], ["b", "t"], ["c", "t"], ["t", "o"]]}, True, "")
+g = call(lv.vi_dump, cs)
+case = next(n["id"] for n in g["nodes"] if n["kind"] == "case")
+tun = next(n["id"] for n in g["nodes"] if n["kind"] == "tunnel" and n.get("direction") == "output")
+call(lv.vi_edit, cs, {"existing": {"C": {"node": case, "remove_cases": [2],
+                                         "add_cases": [{"value": 5, "outputs": {tun: "five"}},
+                                                       {"value": "7..9", "outputs": {tun: "many"}}]}}}, False, False)
+got = [call(lv.vi_run, cs, {"n": v}, ["o"], 10)["values"]["o"] for v in (0, 1, 2, 5, 8)]
+check("add and remove case frames", got == ["zero", "one", "zero", "five", "many"], got)
+g = call(lv.vi_dump, cs)
+check("case frame values", [f.get("values") for f in next(n for n in g["nodes"] if n["kind"] == "case")["frames"]]
+      == [["0"], ["1"], ["5"], ["7, 9"]], g["nodes"][-1])
+
+lp = os.path.join(D, "loop_sr.vi")
+call(lv.vi_create, lp, {"controls": [{"name": "n", "type": "i32", "default": 5}],
+                        "structures": [{"name": "L", "type": "for_loop"}],
+                        "wires": [["n", "L.N"]]}, True, "")
+g = call(lv.vi_dump, lp)
+loop = next(n["id"] for n in g["nodes"] if n["kind"] == "for_loop")
+call(lv.vi_edit, lp, {"existing": {"L": {"node": loop, "shift_registers": ["acc"],
+                                         "functions": [{"name": "a", "function": "Add"}]}},
+                      "constants": [{"name": "zero", "type": "i32", "value": 0}],
+                      "indicators": [{"name": "total", "type": "i32"}],
+                      "wires": [["zero", "acc.left"], ["acc.left", "a.x"], ["L.i", "a.y"], ["a.x+y", "acc.right"],
+                                ["acc.right", "total"]]}, False, False)
+vals = call(lv.vi_run, lp, {"n": 5}, [], 10)["values"]
+check("shift register on an existing loop", vals.get("total") == 10, vals)
+g = call(lv.vi_dump, lp)
+loop = next(n["id"] for n in g["nodes"] if n["kind"] == "for_loop")
+r = call(lv.vi_edit, lp, {"move": {loop: [300, 200]}}, False, False)
+check("move", r.get("moved") == [loop] and r["exec_state"] == "idle", r)
+
 print(f"{'all passed' if not failed else f'{failed} failed'}; files in {D}")
 sys.exit(1 if failed else 0)

@@ -393,6 +393,8 @@ class _Builder:
             self.owner_of[name] = name
             self.children[name] = []
             self.collect(extra, name)
+            for sr in extra.get("shift_registers", []) or []:  # new shift registers on the existing loop
+                self.add(sr, "shiftreg", name, {}, owner=name)
         elif kind == "case":
             frames = extra.get("cases") or {}
             if not isinstance(frames, dict):
@@ -685,6 +687,9 @@ class _Builder:
             out.append(f"<{tag} name={quoteattr(n.name)} in=\"{n.bind}\">")
             if n.kind in ("for", "while"):
                 self.emit(n.name, pos, wires, out)
+                for k, sr in enumerate(m for m in self.nodes.values() if m.owner == n.name and m.kind == "shiftreg"):
+                    out.append(f"<ShiftRegister name={quoteattr(sr.name)} location=\"left\" "
+                               f"offset=\"{PAD_TOP + 30 * k}\"></ShiftRegister>")
             elif n.kind == "case":
                 for i in n.spec.get("_frames", []):
                     out.append(f"<Frame name={quoteattr(f'{n.name}_frame{i}')} index=\"{i}\">")

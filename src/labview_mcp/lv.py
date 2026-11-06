@@ -896,6 +896,160 @@ class LabVIEW:
             return (0, 300), (0, 400)
 
     def vi_edit(self, path: str, spec: dict, backup: bool, allow_broken: bool, rewire: bool = False) -> dict:
+        path = check_vi_path(path)
+        existing_map = spec.get("existing") or {}
+        ops = {k: v for k, v in existing_map.items() if isinstance(existing_map, dict) and isinstance(v, dict)
+               and ("add_cases" in v or "remove_cases" in v)}
+        if not ops:
+            return self._vi_edit(path, spec, backup, allow_broken, rewire)
+        bak = self._backup(path) if backup else None
+        pristine = self._scratch("edit") / Path(path).name
+        shutil.copy2(path, pristine)
+        try:
+            spec = self._edit_case_frames(path, spec, ops)
+            res = self._vi_edit(path, spec, False, allow_broken, rewire, pristine=pristine)
+        except Exception:
+            shutil.copy2(pristine, path)
+            vi = self._vi(path)
+            vi._FlagAsMethod("Revert")
+            _try(lambda: vi.Revert())
+            raise
+        res["backup"] = str(bak) if bak else None
+        return res
+
+    def _backup(self, path: str) -> Path:
+        bdir = Path(path).parent / ".lvmcp-backup"
+        bdir.mkdir(exist_ok=True)
+        bak = bdir / f"{Path(path).stem}.{time.strftime('%Y%m%d-%H%M%S')}{Path(path).suffix}"
+        shutil.copy2(path, bak)
+        return bak
+
+    def _edit_case_frames(self, path: str, spec: dict, ops: dict) -> dict:
+        """existing case entries with "add_cases": [{"value": 5, "default": false, ...contents}] and/or
+        "remove_cases": [frame index, ...]: change the frames and save; return the spec with the new
+        frames' contents moved to "cases" under their frame index."""
+        import gc
+        from win32com.client import VARIANT
+        g = self.vi_dump(path)
+        by_id = {n["id"]: n for n in g["nodes"]}
+        target = self._vi(path)
+        target._FlagAsMethod("SaveInstrument")
+        rd, wr = self._helper(CASENAMES_VI), self._helper(SETCASENAMES_VI)
+        add, rm = self._helper(ADDFRAME_VI), self._helper(REMOVEFRAME_VI)
+        spec = dict(spec)
+        spec["existing"] = existing = dict(spec["existing"])
+        for name, ref in ops.items():
+            n = by_id.get(ref.get("node"))
+            if n is None or n["kind"] != "case":
+                raise LabVIEWError(f"existing {name!r}: add_cases / remove_cases need {{\"node\": <case "
+                                   "structure id from vi_dump>}")
+            cs = self._ref_for_uid(target, n["uid"], "case")
+            rd.SetControlValue("reference", cs)
+            self._run_checked(rd, "reading the case names")
+            names = [x.strip() for x in rd.GetControlValue("names") or ()]
+            removes = sorted({int(i) for i in ref.get("remove_cases", [])}, reverse=True)
+            if any(i < 0 or i >= len(names) for i in removes) or len(removes) >= len(names):
+                raise LabVIEWError(f"existing {name!r}: remove_cases {sorted(removes)} must be frame indices "
+                                   f"0..{len(names) - 1} and leave at least one frame (frames: {names})")
+            for i in removes:
+                rm.SetControlValue("reference", cs)
+                rm.SetControlValue("Frame Index", i)
+                self._run_checked(rm, f"removing case frame {i}")
+                del names[i]
+            quoted = any(x.startswith('"') for x in names)
+            contents = dict(ref.get("cases") or {})
+            # the case's tunnels: vi_dump ids (DFIR numbers them in creation order, the scan reader
+            # by UID) -> the tunnel objects (creation order = UID order) and their types
+            mine = [t for t in g["nodes"] if t["kind"] == "tunnel" and t.get("structure") == n["id"]]
+            mine.sort(key=lambda t: int(re.sub(r"\D", "", t["id"]) or 0))
+            objs = self._uid_rows(target)
+            tun_objs = sorted(u for u, c, o, _ in objs if c == "SelectorTunnel" and o == n["uid"])
+            for k, c in enumerate(ref.get("add_cases", []) or []):
+                if not isinstance(c, dict) or "value" not in c:
+                    raise LabVIEWError(f"existing {name!r}: each add_cases entry needs a \"value\", e.g. "
+                                       "{\"value\": 5, \"functions\": [...]}")
+                v = c["value"]
+                label = ("True" if v else "False") if isinstance(v, bool) else \
+                    f'"{v}"' if quoted and isinstance(v, str) else str(v)
+                if c.get("default"):
+                    names = [x.replace(", Default", "").replace("Default", "").strip(", ") or x for x in names]
+                    label += ", Default"
+                outs = c.get("outputs") or {}
+                before = {u for u, cl, _, _ in self._uid_rows(target) if cl == "InnerTerminal"} if outs else set()
+                add.SetControlValue("reference", cs)
+                add.SetControlValue("Reference Frame Index", len(names) - 1)
+                add.SetControlValue("After? (T)", True)
+                self._run_checked(add, "adding a case frame")
+                names.append(label)
+                if outs:
+                    if len(mine) != len(tun_objs):
+                        raise LabVIEWError(f"existing {name!r}: could not match the case's tunnels "
+                                           f"({len(mine)} in vi_dump, {len(tun_objs)} on the diagram)")
+                    rows = self._uid_rows(target, refs=True)
+                    for tid, value in outs.items():
+                        k3 = next((i for i, t in enumerate(mine) if t["id"] == tid), None)
+                        if k3 is None:
+                            raise LabVIEWError(f"existing {name!r}: outputs: {tid!r} is not a tunnel of this "
+                                               f"case; its tunnels: {[t['id'] for t in mine]}")
+                        # the tunnel's terminal in the new frame: the one the new frame added
+                        inner = [r for u, cl, o, r in rows
+                                 if cl == "InnerTerminal" and o == tun_objs[k3] and u not in before]
+                        if len(inner) != 1:
+                            raise LabVIEWError(f"could not find {tid}'s terminal in the new case {label!r}")
+                        self._terminal_constant(inner[0], mine[k3].get("type"), value,
+                                                f"output {tid} of the new case {label!r}")
+                body = {k2: v2 for k2, v2 in c.items() if k2 not in ("value", "default", "outputs")}
+                if body:
+                    contents[str(len(names) - 1)] = body
+            wr.SetControlValue("reference", cs)
+            wr.SetControlValue("names", VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_BSTR, names))
+            self._run_checked(wr, f"naming the cases {names}")
+            rd.Run(False)
+            got = [x.strip() for x in rd.GetControlValue("names") or ()]
+            if len(got) != len(names):
+                raise LabVIEWError(f"the case structure has frames {got}, expected {names}")
+            # by UID: once frames changed, vi_dump may read the VI another way and number nodes differently
+            existing[name] = {k2: v2 for k2, v2 in ref.items()
+                              if k2 not in ("add_cases", "remove_cases", "cases", "node")}
+            existing[name]["uid"] = n["uid"]
+            if contents:
+                existing[name]["cases"] = contents
+        target.SaveInstrument(path, False, False)
+        target = cs = None
+        self._uid_refs = {}
+        gc.collect()
+        return spec
+
+    def _uid_rows(self, target, refs: bool = False) -> list:
+        """(uid, class, owner uid, name or reference) of every object on the block diagram."""
+        h = self._helper(UIDS_VI)
+        h.SetControlValue("VI Refnum", target)
+        h.SetControlValue("Traverse Target", 1)
+        h.SetControlValue("Class Name", "GObject")
+        h.Run(False)
+        return list(zip(h.GetControlValue("UIDs") or (), h.GetControlValue("Classes") or (),
+                        h.GetControlValue("Owner UIDs") or (),
+                        h.GetControlValue("References" if refs else "Names") or ()))
+
+    def _terminal_constant(self, term, typ, value, what: str) -> None:
+        """A constant made from a terminal (Terminal.Create Constant) and set to `value`."""
+        from win32com.client import VARIANT
+        from . import gen
+        if typ is None or (isinstance(typ, str) and typ.startswith("type_")):
+            raise LabVIEWError(f"{what}: its type is unknown, so the value cannot be set")
+        try:
+            lt = gen.parse_type(typ)
+            ts, ds = lt.td(), lt.data(lt.enum_index(value) if lt.kind == "enum" else value)
+        except (gen.SpecError, TypeError, ValueError) as e:
+            raise LabVIEWError(f"{what}: {value!r} is not a {typ}: {e}") from None
+        h = self._helper(TERMCONST_VI)
+        h.SetControlValue("reference", term)
+        h.SetControlValue("type string", VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_UI1, ts))
+        h.SetControlValue("data string", VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_UI1, ds))
+        self._run_checked(h, what)
+
+    def _vi_edit(self, path: str, spec: dict, backup: bool, allow_broken: bool, rewire: bool = False,
+                 pristine: Path | None = None) -> dict:
         from . import gen
 
         path = check_vi_path(path)
@@ -910,13 +1064,14 @@ class LabVIEW:
         remove = spec.get("remove") or []
         if not isinstance(remove, list) or not all(isinstance(r, str) for r in remove):
             raise LabVIEWError("\"remove\" is a list of vi_dump node ids, e.g. [\"multiply_18\"]")
-        rename, values, retype = (spec.get(k) or {} for k in ("rename", "values", "retype"))
+        rename, values, retype, move = (spec.get(k) or {} for k in ("rename", "values", "retype", "move"))
         disconnect = spec.get("disconnect") or []
-        for k, v in (("rename", rename), ("values", values), ("retype", retype)):
+        for k, v in (("rename", rename), ("values", values), ("retype", retype), ("move", move)):
             if not isinstance(v, dict):
                 raise LabVIEWError(f"\"{k}\" maps a front-panel label (or a vi_dump constant id) to "
                                    + {"rename": "its new label", "values": "a value",
-                                      "retype": "a numeric type, e.g. \"i32\""}[k])
+                                      "retype": "a numeric type, e.g. \"i32\"",
+                                      "move": "a diagram position [x, y]"}[k])
         for t in retype.values():
             if t not in _REPRESENTATION:
                 raise LabVIEWError(f"retype: {t!r} is not a numeric type; one of {sorted(_REPRESENTATION)}")
@@ -933,7 +1088,7 @@ class LabVIEW:
         graph = None
         if remove or disconnect or any(isinstance(v, dict) and ("node" in v or "uid" in v)
                                        for v in existing_map.values()) or \
-                any(not self._is_label(k, target) for k in [*values, *retype]):
+                bool(move) or any(not self._is_label(k, target) for k in [*values, *retype]):
             graph = self.vi_dump(path)
         by_id = {n["id"]: n for n in (graph or {}).get("nodes", [])}
         cut_wires, cut_sinks = [], 0  # wires deleted by "disconnect" and the ends they had
@@ -1040,7 +1195,7 @@ class LabVIEW:
 
         (fpw, fph), (bdw, bdh) = self._content_size(path)
         main_spec = {k: v for k, v in spec.items()
-                     if k not in ("existing", "remove", "rename", "values", "retype", "disconnect")}
+                     if k not in ("existing", "remove", "rename", "values", "retype", "disconnect", "move")}
         main_spec["wires"] = main_wires
         script = gen.build(main_spec,
                            existing=[{"name": b[0], "kind": b[1], "spec": b[3]} for b in bindings],
@@ -1060,8 +1215,9 @@ class LabVIEW:
             bak = bdir / f"{Path(path).stem}.{time.strftime('%Y%m%d-%H%M%S')}{Path(path).suffix}"
             shutil.copy2(path, bak)
         # the file as it was, to put back if the edit only shows as broken once saved
-        pristine = self._scratch("edit") / Path(path).name
-        shutil.copy2(path, pristine)
+        if pristine is None:
+            pristine = self._scratch("edit") / Path(path).name
+            shutil.copy2(path, pristine)
 
         removed = 0
         if cut_wires:
@@ -1155,7 +1311,7 @@ class LabVIEW:
                 _try(lambda: target.Revert())
                 raise LabVIEWError(f"{e} The VI was reverted and not saved.") from None
         try:
-            changed = self._edit_objects(target, by_id, rename, values, retype)
+            changed = self._edit_objects(target, by_id, rename, values, retype, move)
         except LabVIEWError as e:
             _try(lambda: target.Revert())
             raise LabVIEWError(f"{e} The VI was reverted and not saved.") from None
@@ -1170,9 +1326,10 @@ class LabVIEW:
                 f"LabVIEW connected only {after - before} of the {n_wires} requested wires "
                 "(a wire into an input that is already wired, or between incompatible terminals, is "
                 "silently dropped). The VI was reverted and not saved. Check the spec with vi_dump.")
-        if broken and (cut_wires or remove_nodes):
-            # After deleting objects LabVIEW keeps reporting "broken" until the VI is saved; save,
-            # then judge (and put the original file back if it really is broken).
+        if broken:
+            # After objects were deleted (here or by a case-frame change) LabVIEW keeps reporting
+            # "broken" until the references to them are released; save, release, judge again (and
+            # put the original file back if it really is broken).
             target.SaveInstrument(path, False, False)
             # LabVIEW rechecks the VI only once the references this edit holds are released
             target = refs = ref_of = items = None
@@ -1236,14 +1393,24 @@ class LabVIEW:
         existing_map.setdefault(name, n["label"] if n["kind"] in ("control", "indicator") else {"node": node})
         return f"{name}.{term}" if term else name
 
-    def _edit_objects(self, target, by_id: dict, rename: dict, values: dict, retype: dict) -> dict:
+    def _edit_objects(self, target, by_id: dict, rename: dict, values: dict, retype: dict,
+                      move: dict | None = None) -> dict:
         """vi_edit "rename" / "values" / "retype" on front-panel objects (by label) and constants
         (by vi_dump id)."""
         from win32com.client import VARIANT
         from . import gen
         done: dict = {}
-        if not (rename or values or retype):
+        move = move or {}
+        if not (rename or values or retype or move):
             return done
+        for key, xy in move.items():  # block-diagram objects by vi_dump id
+            n = by_id.get(key)
+            if n is None or "uid" not in n or not (isinstance(xy, (list, tuple)) and len(xy) == 2):
+                raise LabVIEWError(f"move: give a vi_dump node id and [x, y]; got {key!r}: {xy!r}")
+            h = self._helper(SETPOS_VI)
+            h.SetControlValue("reference", self._ref_for_uid(target, n["uid"], n["kind"]))
+            h.SetControlValue("position", (int(xy[0]), int(xy[1])))
+            self._run_checked(h, f"moving {key!r}")
         fp = self._fp_refs_by_label(target)
         arr = pythoncom.VT_ARRAY | pythoncom.VT_UI1
 
@@ -1287,7 +1454,7 @@ class LabVIEW:
             h.SetControlValue("reference", fp[old])
             h.SetControlValue("text", str(new))
             self._run_checked(h, f"renaming {old!r}")
-        for k, v in (("renamed", rename), ("values_set", values), ("retyped", retype)):
+        for k, v in (("renamed", rename), ("values_set", values), ("retyped", retype), ("moved", move)):
             if v:
                 done[k] = sorted(v)
         return done
@@ -1599,6 +1766,10 @@ CONSTTYPE_VI = VIS_DIR / "lvmcp_consttype.vi"
 CTLTYPE_VI = VIS_DIR / "lvmcp_ctltype.vi"
 CONPANE_VI = VIS_DIR / "lvmcp_conpane.vi"
 SUBVIPATH_VI = VIS_DIR / "lvmcp_subvipath.vi"
+CASENAMES_VI = VIS_DIR / "lvmcp_casenames.vi"
+SETCASENAMES_VI = VIS_DIR / "lvmcp_setcasenames.vi"
+REMOVEFRAME_VI = VIS_DIR / "lvmcp_removeframe.vi"
+SETPOS_VI = VIS_DIR / "lvmcp_setpos.vi"
 RELABEL_VI = VIS_DIR / "lvmcp_relabel.vi"
 CONSTVALUE_VI = VIS_DIR / "lvmcp_constvalue.vi"
 REP_VI = VIS_DIR / "lvmcp_rep.vi"

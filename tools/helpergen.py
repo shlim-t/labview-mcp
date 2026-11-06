@@ -372,6 +372,35 @@ HELPERS["lvmcp_constrep"] = {
                "write": True}],
     "wires": [("reference", "w.reference"), ("representation", "w.Representation"), ("w.error out", "error out")],
 }
+# CaseStructure.Frame Names (read / write): the selector values of each case, as LabVIEW writes them
+# ("1", "\"apple\"", "Init", "Default"); writing renames the cases (vi_edit "case_frames")
+HELPERS["lvmcp_casenames"] = {
+    "controls": [("reference", "ref:CaseStructure")],
+    "indicators": [("names", "string[]"), ("error out", "error")],
+    "nodes": [{"name": "p", "kind": "property", "class": "CaseStructure", "items": ["FrameNames"]}],
+    "wires": [("reference", "p.reference"), ("p.FrameNames", "names"), ("p.error out", "error out")],
+}
+HELPERS["lvmcp_setcasenames"] = {
+    "controls": [("reference", "ref:CaseStructure"), ("names", "string[]")],
+    "indicators": [("error out", "error")],
+    "nodes": [{"name": "w", "kind": "property", "class": "CaseStructure", "items": ["FrameNames"], "write": True}],
+    "wires": [("reference", "w.reference"), ("names", "w.FrameNames"), ("w.error out", "error out")],
+}
+# MultiFrameStructure.Remove Frame
+HELPERS["lvmcp_removeframe"] = {
+    "controls": [("reference", "ref:MultiFrameStructure"), ("Frame Index", "i32")],
+    "indicators": [("error out", "error")],
+    "nodes": [{"name": "r", "kind": "invoke", "class": "MultiFrameStructure", "method": "Remove Frame"}],
+    "wires": [("reference", "r.reference"), ("Frame Index", "r.Frame Index"), ("r.error out", "error out")],
+}
+# GObject.Position (write): move an object on its diagram
+HELPERS["lvmcp_setpos"] = {
+    "controls": [("reference", "ref:GObject"),
+                 ("position", {"cluster": [{"name": "Left", "type": "i32"}, {"name": "Top", "type": "i32"}]})],
+    "indicators": [("error out", "error")],
+    "nodes": [{"name": "w", "kind": "property", "class": "GObject", "items": ["Position"], "write": True}],
+    "wires": [("reference", "w.reference"), ("position", "w.Position"), ("w.error out", "error out")],
+}
 # EventStructure.Timeout Terminal: the terminal to wire the timeout (ms) to
 HELPERS["lvmcp_timeoutterm"] = {
     "controls": [("reference", "ref:EventStructure")],
@@ -389,7 +418,8 @@ HELPERS["lvmcp_eventsel"] = {
 
 ORDER = ["lvmcp_move", "lvmcp_propwrite", "lvmcp_proplink", "lvmcp_invokelink", "lvmcp_uid", "lvmcp_classname",
          "lvmcp_allprops", "lvmcp_signal", "lvmcp_fire", "lvmcp_timeoutterm", "lvmcp_eventsel", "lvmcp_termconst", "lvmcp_outcnt", "lvmcp_consttype", "lvmcp_ctltype", "lvmcp_termind", "lvmcp_conpane", "lvmcp_subvipath", "lvmcp_relabel", "lvmcp_constvalue",
-         "lvmcp_rep", "lvmcp_constrep"]
+         "lvmcp_rep", "lvmcp_constrep", "lvmcp_casenames", "lvmcp_setcasenames",
+         "lvmcp_removeframe", "lvmcp_setpos"]
 
 
 def main(args: list[str]) -> None:

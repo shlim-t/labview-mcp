@@ -307,6 +307,15 @@ async def vi_edit(
           {"node": "multiply_7"}         a vi_dump node (function, subVI, constant, loop, case)
           {"node": "for_loop_3", "functions": [...], ...}       new code inside an existing loop
           {"node": "case_structure_5", "cases": {"1": {...}}}   new code inside case frame 1
+          {"node": "for_loop_3", "shift_registers": ["acc"], ...}  new shift registers on a loop
+                                       (wire "acc.left" / "acc.right" like in vi_create)
+          {"node": "case_structure_5", "remove_cases": [2],
+           "add_cases": [{"value": 5, "outputs": {"tunnel_9": "five"}, ...contents},
+                         {"value": "7..9", "default": true}]}
+                                       remove frames (by index) and add frames (value, range or
+                                       string as the selector takes); "outputs" gives the new frame's
+                                       value for existing output tunnels (vi_dump tunnel ids)
+      "move": {"for_loop_3": [300, 200]}   move block-diagram objects
       "rename": {"Gain": "Gain (dB)"}  relabel front-panel controls/indicators
       "values": {"Gain": 2.5, "constant_6": 10}   a control's default value (by label) or a
                                        constant's value (vi_dump id)
