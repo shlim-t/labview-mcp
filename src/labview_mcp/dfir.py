@@ -208,7 +208,7 @@ _NODE_NAMES = {"ConcatenateNode": "Concatenate Strings", "BuildArrayNode": "Buil
                "CompoundArithmeticNode": "Compound Arithmetic", "MergeErrorsNode": "Merge Errors",
                "ArrayIndexNode": "Index Array", "DeleteArrayNode": "Delete From Array",
                "ReplaceArrayNode": "Replace Array Subset", "ArraySubsetNode": "Array Subset",
-               "InsertIntoArrayNode": "Insert Into Array", "RandomNumber0To1Primitive": "Random Number (0-1)",
+               "InsertIntoArrayNode": "Insert Into Array", "InitArrayNode": "Initialize Array", "RandomNumber0To1Primitive": "Random Number (0-1)",
                "GetDateOrTimeInSecondsPrimitive": "Get Date/Time In Seconds"}
 # Growable nodes: DFIR terminal i is what vi_create calls element[i].
 _GROWABLE = {"ConcatenateNode", "BuildArrayNode", "UnbundleNode", "BundleNode"}
@@ -235,6 +235,12 @@ def _palette_name(cls: str, catalog: dict[str, list[str]]) -> str | None:
     for c in cands:
         if c.lower() in low:
             return low[c.lower()]
+    # ignoring spaces and punctuation: TDMSRead -> "TDMS Read", Transpose2DArray -> "Transpose 2D Array"
+    flat = {re.sub(r"[^a-z0-9]", "", k.lower()): k for k in catalog}
+    for c in (base, base[2:] if base.startswith("Is") else base):
+        k = flat.get(re.sub(r"[^a-z0-9]", "", c.lower()))
+        if k:
+            return k
     for c in cands:  # palette names with a unit suffix, e.g. WaitPrimitive -> "Wait (ms)"
         hits = sorted(k for k in catalog if k.lower().startswith(c.lower() + " ("))
         if len(hits) == 1:

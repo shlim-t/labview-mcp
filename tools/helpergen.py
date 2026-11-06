@@ -166,8 +166,22 @@ def build_helper(lv: LabVIEW, path: Path, spec: dict) -> dict:
     if st:
         t.SaveInstrument(str(path), False, False)  # kept for inspection
         raise LabVIEWError(f"wiring failed (error {code}): {src}")
+    # Outputs whose terminal name holds "[]" (e.g. Ctrls[]) cannot be wired by name: LabVIEW makes
+    # an indicator for them (Terminal.Create Indicator), labelled as LabVIEW chooses.
+    made = {}
+    for node, term in spec.get("term_indicators", []):
+        uid = lv._uid_of(refs[[n["name"] for n in nodes].index(node)])
+        by_uid = dict(lv._owned(t, "Terminal", uid))
+        tref = next((by_uid[u] for u, nm in lv._owned(t, "Terminal", uid, names=True) if nm == term), None)
+        if tref is None:
+            raise LabVIEWError(f"{node} has no terminal {term!r}")
+        before = set(lv._fp_refs_by_label(t))
+        h = lv._helper(path.parent / "lvmcp_termind.vi")  # generated before (ORDER)
+        h.SetControlValue("reference", tref)
+        lv._run_checked(h, f"making an indicator for {node}.{term}")
+        made[term] = sorted(set(lv._fp_refs_by_label(t)) - before)
     t.SaveInstrument(str(path), False, False)
-    return {"path": str(path)}
+    return {"path": str(path), **({"indicators made": made} if made else {})}
 
 
 
@@ -298,6 +312,31 @@ def _typeof_helper(cls: str) -> dict:
 
 HELPERS["lvmcp_consttype"] = _typeof_helper("Constant")
 HELPERS["lvmcp_ctltype"] = _typeof_helper("Control")
+# Terminal.Create Indicator: an indicator wired to a terminal (for outputs named "...[]")
+HELPERS["lvmcp_termind"] = {
+    "controls": [("reference", "ref:Terminal")],
+    "indicators": [("error out", "error")],
+    "nodes": [{"name": "k", "kind": "invoke", "class": "Terminal", "method": "Create Indicator"}],
+    "wires": [("reference", "k.reference"), ("k.error out", "error out")],
+}
+# VI.Connector Pane -> ConnectorPane.Controls[]: the front-panel controls in connector-terminal order
+# (unassigned terminals give Not a Refnum); readable for password-protected VIs too
+HELPERS["lvmcp_conpane"] = {
+    "controls": [("reference", "ref:VI")],
+    "indicators": [("error out", "error")],
+    "nodes": [{"name": "a", "kind": "property", "class": "VI", "items": ["ConPane.Ref"]},
+              {"name": "b", "kind": "property", "class": "ConnectorPane", "items": ["Ctrls[]"]}],
+    "wires": [("reference", "a.reference"), ("a.ConPane", "b.reference"),
+              ("a.error out", "b.error in (no error)"), ("b.error out", "error out")],
+    "term_indicators": [("b", "Ctrls[]")],
+}
+# SubVI.VI Path: the VI a subVI node calls (also polymorphic, dynamic-dispatch and Call Parent nodes)
+HELPERS["lvmcp_subvipath"] = {
+    "controls": [("reference", "ref:SubVI")],
+    "indicators": [("path", "path"), ("error out", "error")],
+    "nodes": [{"name": "p", "kind": "property", "class": "SubVI", "items": ["VIPath"]}],
+    "wires": [("reference", "p.reference"), ("p.VIPath", "path"), ("p.error out", "error out")],
+}
 # EventStructure.Timeout Terminal: the terminal to wire the timeout (ms) to
 HELPERS["lvmcp_timeoutterm"] = {
     "controls": [("reference", "ref:EventStructure")],
@@ -314,7 +353,7 @@ HELPERS["lvmcp_eventsel"] = {
 }
 
 ORDER = ["lvmcp_move", "lvmcp_propwrite", "lvmcp_proplink", "lvmcp_invokelink", "lvmcp_uid", "lvmcp_classname",
-         "lvmcp_allprops", "lvmcp_signal", "lvmcp_fire", "lvmcp_timeoutterm", "lvmcp_eventsel", "lvmcp_termconst", "lvmcp_outcnt", "lvmcp_consttype", "lvmcp_ctltype"]
+         "lvmcp_allprops", "lvmcp_signal", "lvmcp_fire", "lvmcp_timeoutterm", "lvmcp_eventsel", "lvmcp_termconst", "lvmcp_outcnt", "lvmcp_consttype", "lvmcp_ctltype", "lvmcp_termind", "lvmcp_conpane", "lvmcp_subvipath"]
 
 
 def main(args: list[str]) -> None:

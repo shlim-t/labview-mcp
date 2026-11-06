@@ -1267,6 +1267,10 @@ class LabVIEW:
         from . import dfir
         cache = self.__dict__.setdefault("_conpane_cache", {})
         if path not in cache:
+            names = _try(lambda: self._conpane_labels(path))
+            if names is not None:
+                cache[path] = names
+                return names
             try:
                 g = dfir.parse(self._dfir_text(path))
                 terms = [(n["conpane_index"], n.get("label", "")) for n in g["nodes"]
@@ -1276,6 +1280,23 @@ class LabVIEW:
             except LabVIEWError:
                 cache[path] = None
         return cache[path]
+
+    def _conpane_labels(self, path: str) -> list[str]:
+        """Labels of the controls on a VI's connector pane, in terminal order, skipping unassigned
+        terminals (the order DFIR numbers a subVI node's terminals). Works for locked VIs too: it
+        reads the front panel (VI.Connector Pane -> Controls[])."""
+        h = self._helper(CONPANE_VI)
+        vi = self._vi(path)  # kept alive until the helper has run
+        h.SetControlValue("reference", vi)
+        self._run_checked(h, "reading the connector pane")
+        lab = self._vi(str(Path(self.app.ApplicationDirectory) / _VILIB_TREF / "Get GObject Label.vi"))
+        out = []
+        for r in h.GetControlValue("Controls[]") or ():
+            if r:
+                lab.SetControlValue("GObject", r)
+                lab.Run(False)
+                out.append(lab.GetControlValue("Object Label"))
+        return out
 
     def vi_dump(self, path: str, method: str = "auto") -> dict:
         """method: "dfir" (compiler export: constant values, but refuses some VIs), "scan" (walk the
@@ -1361,6 +1382,15 @@ class LabVIEW:
     def _scan_types(self, target, g: dict, refs: dict) -> None:
         """Data types of constants and front-panel terminals, from their values' flattened type."""
         from . import td
+        sp = _try(lambda: self._helper(SUBVIPATH_VI))
+        for n in g["nodes"]:
+            if sp is not None and n["kind"] == "subvi" and n.get("uid") in refs:
+                sp.SetControlValue("reference", refs[n["uid"]])
+                sp.Run(False)
+                if not sp.GetControlValue("error out")[0]:
+                    p = str(sp.GetControlValue("path") or "")
+                    if p:
+                        n["path"] = p
         ct, ft = self._helper(CONSTTYPE_VI), self._helper(CTLTYPE_VI)
         fp = None
         for n in g["nodes"]:
@@ -1410,6 +1440,8 @@ TERMCONST_VI = VIS_DIR / "lvmcp_termconst.vi"
 OUTCNT_VI = VIS_DIR / "lvmcp_outcnt.vi"
 CONSTTYPE_VI = VIS_DIR / "lvmcp_consttype.vi"
 CTLTYPE_VI = VIS_DIR / "lvmcp_ctltype.vi"
+CONPANE_VI = VIS_DIR / "lvmcp_conpane.vi"
+SUBVIPATH_VI = VIS_DIR / "lvmcp_subvipath.vi"
 _STD_TERMS = {"reference", "reference out", "error in (no error)", "error out"}
 _ANY_STYLE = 4294967295  # GObject.Replace "Style": -1 as U32, find the object by its palette name
 _REMOVE_CORE = Path("vi.lib") / "Utility" / "QuickDropSupport" / "Remove and Rewire Objects_core.vi"

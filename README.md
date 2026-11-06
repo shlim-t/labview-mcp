@@ -4,7 +4,7 @@ An [MCP](https://modelcontextprotocol.io) server that lets AI coding agents — 
 
 LabVIEW source code is a binary, graphical format. Text-based coding agents can't open a `.vi` file. labview-mcp acts as the agent's eyes and hands: it drives your installed LabVIEW over its ActiveX server and returns what the agent needs as text, images, and values.
 
-> Status: **v0.16.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth, and **user interfaces**: front-panel styles (buttons, LEDs, knobs, gauges, charts), event structures (control and VI events, Timeout, event data), and Property and Invoke Nodes. Any existing VI can be read as a graph (`vi_dump`) and changed in place (`vi_edit`: remove, replace, and add code, including inside existing loops and case frames). **Projects and builds**: the agent can put VIs in a project, add application (EXE), packed-library, and source-distribution build specs, build them, and mass compile folders.
+> Status: **v0.17.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth, and **user interfaces**: front-panel styles (buttons, LEDs, knobs, gauges, charts), event structures (control and VI events, Timeout, event data), and Property and Invoke Nodes. Any existing VI can be read as a graph (`vi_dump`) and changed in place (`vi_edit`: remove, replace, and add code, including inside existing loops and case frames). **Projects and builds**: the agent can put VIs in a project, add application (EXE), packed-library, and source-distribution build specs, build them, and mass compile folders.
 
 ## What the agent can do
 
@@ -316,7 +316,7 @@ agent ──MCP/stdio──▶ labview-mcp ──ActiveX (COM)──▶ LabVIEW.
 - **Shipping:** `python tools/build_helpers.py` saves every helper for LabVIEW 2015 into `src/labview_mcp/vis/`, which is what ships.
 - **Class table:** `src/labview_mcp/vi_classes.json` maps VI Server class names to the class numbers used in refnum type descriptors. It was measured by wiring a refnum of each class number into a Property Node and reading the node's class.
 - `tests/live_vi_create.py`, `tests/live_vi_edit.py`, `tests/live_project.py`, and `tests/smoke_mcp.py` need Windows and LabVIEW.
-- **Measurement:** `python tools/measure.py run` reads every software example VI shipped with LabVIEW (about 960), converts each to a `vi_create` spec, rebuilds it in a scratch folder, and compares the rebuilt VI with the original. `python tools/measure.py report` ranks the features that block rebuilding by how many examples use them. Originals are only read, never saved. The first baseline: 962/964 examples read, 23 rebuilt identically. They build real VIs, run them, and check the results.
+- **Measurement:** `python tools/measure.py run` reads every software example VI shipped with LabVIEW (about 960), converts each to a `vi_create` spec, rebuilds it in a scratch folder, and compares the rebuilt VI with the original. `python tools/measure.py report` ranks the features that block rebuilding by how many examples use them. Originals are only read, never saved. The first baseline: 962/964 examples read, 23 rebuilt identically. After v0.17.0's reader fixes, examples blocked by a read gap fell from 742 to 374, and 27 are rebuilt identically. They build real VIs, run them, and check the results.
 
 ## License
 

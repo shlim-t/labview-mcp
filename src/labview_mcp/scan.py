@@ -33,6 +33,8 @@ _STRUCTS = {"ForLoop": "for_loop", "WhileLoop": "while_loop", "CaseStructure": "
             "MathScriptNode": "mathscript", "FormulaNode": "formula_node"}
 _MULTI_FRAME = {"case", "event_structure", "stacked_sequence", "disable_structure",
                 "conditional_disable", "flat_sequence", "type_specialization"}
+# parts of a node (a Property Node's items, a Formula Node's parameters): their terminals are the node's
+_PARTS = {"PropertyItem", "FormulaParameter", "ScriptNodeParameter", "MathScriptNodeParameter"}
 _SKIP = {"Wire", "Diagram", "TopLevelDiagram", "Text", "Label", "Decoration", "Joint", "Comment"}
 
 
@@ -61,7 +63,7 @@ def build(rows: list[Row], labels: dict[int, str]) -> dict:
             kind_of[r.uid] = _slug(r.cls)
     node_id: dict[int, str] = {}
     for r in rows:
-        if r.cls in _SKIP or _is_terminal(r.cls) or r.cls.endswith("Tunnel") or "ShiftRegister" in r.cls:
+        if r.cls in _SKIP or r.cls in _PARTS or _is_terminal(r.cls) or r.cls.endswith("Tunnel")                 or "ShiftRegister" in r.cls:
             continue
         if r.cls.endswith("Constant") and by_uid.get(r.owner) and by_uid[r.owner].cls.endswith("Constant"):
             continue  # the element of an array/cluster constant, not a node of its own
@@ -115,6 +117,10 @@ def build(rows: list[Row], labels: dict[int, str]) -> dict:
             n["vi"] = labels.get(r.uid, "")
         elif r.cls in ("Property", "Invoke"):
             n["kind"] = "property_node" if r.cls == "Property" else "invoke_node"
+            items = [t.name for p in rows if p.owner == r.uid and p.cls == "PropertyItem"
+                     for t in rows if t.owner == p.uid and _is_terminal(t.cls) and t.name]
+            if items:
+                n["items"] = list(dict.fromkeys(items))
         else:
             n["kind"] = "function"
             n["function"] = labels.get(r.uid, r.cls)
@@ -137,6 +143,8 @@ def build(rows: list[Row], labels: dict[int, str]) -> dict:
 
     def term_name(t: Row) -> str:
         o = t.owner
+        if by_uid.get(o) and by_uid[o].cls in _PARTS:
+            o = by_uid[o].owner
         if t.cls == "ControlTerminal":
             return node_id.get(t.uid, str(t.uid))
         if o in tunnel_id:
