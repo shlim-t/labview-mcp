@@ -1740,6 +1740,18 @@ class LabVIEW:
                     p = str(sp.GetControlValue("path") or "")
                     if p:
                         n["path"] = p
+        cn = _try(lambda: self._helper(CASENAMES_VI))
+        for n in g["nodes"]:  # case frames: LabVIEW's own case names ("1..3, 5", "Default")
+            if cn is not None and n["kind"] == "case" and n.get("uid") in refs and n.get("frames"):
+                cn.SetControlValue("reference", refs[n["uid"]])
+                cn.Run(False)
+                if not cn.GetControlValue("error out")[0]:
+                    names = [str(x).strip() for x in cn.GetControlValue("names") or ()]
+                    if len(names) == len(n["frames"]):
+                        for fr, nm in zip(n["frames"], names):
+                            fr["name"] = nm
+                            if "Default" in [x.strip() for x in nm.split(",")]:
+                                fr["default"] = True
         ct, ft = self._helper(CONSTTYPE_VI), self._helper(CTLTYPE_VI)
         fp = None
         for n in g["nodes"]:

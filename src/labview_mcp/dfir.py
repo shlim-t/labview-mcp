@@ -116,6 +116,7 @@ class TypeTable:
             td.update(kind="enum", items=items)
         else:
             td["kind"] = f"type_0x{code:02x}"
+            td["raw"] = body.hex()
         td["name"] = self._name(body, at) if named and at is not None else ""
         return td
 
@@ -135,6 +136,8 @@ class TypeTable:
                                 for f in td["fields"] if f < len(self.tds)]}
         if k == "enum":
             return {"enum": td["items"]}
+        if td["code"] == 0x70 and td.get("raw"):
+            return refnum_type(bytes.fromhex(td["raw"]), "<")
         return k
 
     def root(self) -> int | None:
@@ -213,6 +216,30 @@ _NODE_NAMES = {"ConcatenateNode": "Concatenate Strings", "BuildArrayNode": "Buil
 # Growable nodes: DFIR terminal i is what vi_create calls element[i].
 _GROWABLE = {"ConcatenateNode", "BuildArrayNode", "UnbundleNode", "BundleNode"}
 _PRINTF = ["format string", "initial string", "resulting string", "error in", "error out"]
+
+
+_REF_KINDS = {0x12: "queue", 0x19: "user event", 0x1e: "lvclass", 0x13: "notifier", 0x0e: "occurrence",
+              0x04: "file", 0x16: "data value reference", 0x1a: "event registration"}
+
+
+def refnum_type(body: bytes, endian: str):
+    """A refnum type descriptor body -> "ref:<class>" for VI Server references, else a description
+    such as {"refnum": "lvclass", "class": "Person.lvclass"} (not creatable yet)."""
+    import struct as _st
+    if len(body) < 2:
+        return "type_0x70"
+    kind = _st.unpack_from(endian + "H", body, 0)[0]
+    if kind == 0x08 and len(body) >= 4:
+        cid = _st.unpack_from(endian + "H", body, 2)[0]
+        from .gen import VI_CLASSES
+        name = next((c for c, i in VI_CLASSES.items() if i == cid), None)
+        return f"ref:{name}" if name else {"refnum": "VI Server", "class_id": cid}
+    out = {"refnum": _REF_KINDS.get(kind, f"0x{kind:02x}")}
+    if kind == 0x1e:
+        names = [x.decode("utf-8", "replace") for x in re.findall(rb"[\x20-\x7e]{3,}?\.lvclass", body)]
+        if names:
+            out["class"] = names[0].lstrip(" \x00")
+    return out
 
 
 def _short(ref: str) -> str:

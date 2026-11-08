@@ -4,7 +4,7 @@ An [MCP](https://modelcontextprotocol.io) server that lets AI coding agents — 
 
 LabVIEW source code is a binary, graphical format. Text-based coding agents can't open a `.vi` file. labview-mcp acts as the agent's eyes and hands: it drives your installed LabVIEW over its ActiveX server and returns what the agent needs as text, images, and values.
 
-> Status: **v0.20.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth, and **user interfaces**: front-panel styles (buttons, LEDs, knobs, gauges, charts), event structures (control and VI events, Timeout, event data), and Property and Invoke Nodes. Any existing VI can be read as a graph (`vi_dump`) and changed in place (`vi_edit`: remove, replace, and add code, including inside existing loops and case frames). **Projects and builds**: the agent can put VIs in a project, add application (EXE), packed-library, and source-distribution build specs, build them, and mass compile folders.
+> Status: **v0.21.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth, and **user interfaces**: front-panel styles (buttons, LEDs, knobs, gauges, charts), event structures (control and VI events, Timeout, event data), and Property and Invoke Nodes. Any existing VI can be read as a graph (`vi_dump`) and changed in place (`vi_edit`: remove, replace, and add code, including inside existing loops and case frames). **Projects and builds**: the agent can put VIs in a project, add application (EXE), packed-library, and source-distribution build specs, build them, and mass compile folders.
 
 ## What the agent can do
 
@@ -239,7 +239,7 @@ with wires `["d.NewVal", "last"]`, `["W.i", "inc.x"]`, `["inc.x+1", "ticks"]`, `
 
 Strings are stored in the Windows ANSI code page, as LabVIEW does, so characters outside it (for example `é` on Korean Windows) become the closest match.
 
-Types: `dbl sgl i8 i16 i32 i64 u8 u16 u32 u64 bool string path error`, enums (`{"enum": [...]}`), arrays (`"dbl[]"`, `"i32[][]"`), and clusters (`{"cluster": [{"name": "gain", "type": "dbl"}, ...]}`). Function terminals use the names shown in LabVIEW's Context Help. SubVI terminals use the subVI's control labels.
+Types: `dbl sgl i8 i16 i32 i64 u8 u16 u32 u64 bool string path error`, VI Server references (`"ref:Control"`, `"ref:VI"`, `"ref:Boolean[]"`), enums (`{"enum": [...]}`), arrays (`"dbl[]"`, `"i32[][]"`, or `{"array": <type>, "dims": 1}` for arrays of clusters), and clusters (`{"cluster": [{"name": "gain", "type": "dbl"}, ...]}`). Function terminals use the names shown in LabVIEW's Context Help. SubVI terminals use the subVI's control labels.
 
 ### Projects and builds
 

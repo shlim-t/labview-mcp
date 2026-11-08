@@ -176,13 +176,12 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
             if st["type"] == "case":
                 cases = []
                 for fr in st.pop("_frames"):
-                    vals = fr.get("values", [])
                     entry = fill(f"{st['name']}#{fr['index']}")
-                    if len(vals) > 1 or any("," in v for v in vals):
-                        bad("case: several values or a range in one frame")
-                        vals = vals[:1]
-                    if vals:
-                        entry["value"] = _case_value(vals[0], st["name"], wires, nodes)
+                    value = _frame_value(fr, st["name"], wires, nodes)
+                    if value is not None:
+                        entry["value"] = value
+                        if isinstance(value, str) and (", " in value or ".." in value):
+                            features.add("case: several values or a range")
                     elif not fr.get("default"):
                         bad("case: frame without a value")
                     if fr.get("default"):
@@ -224,6 +223,41 @@ def _map_end(e: str, nodes, sr_name, case_out, role: str) -> str:
     if n["kind"] == "subvi" and not term:
         raise _Unsupported("subVI terminal without a name")
     return f"{node}.{term}" if term else node
+
+
+def _frame_value(fr: dict, case: str, wires, nodes):
+    """A case frame's selector value(s) in vi_create form: a number / bool / string for one value,
+    else LabVIEW's case-name text ("1..3, 5", '"a", "b"'). From the scan reader's frame "name"
+    (LabVIEW's own text) or the DFIR reader's "values" ("lo, hi" is a range)."""
+    if fr.get("name") is not None:
+        parts = [x.strip() for x in fr["name"].split(",") if x.strip() and x.strip() != "Default"]
+        text = ", ".join(parts)
+        if not parts:
+            return None
+        if len(parts) == 1 and ".." not in parts[0]:
+            return _case_value(parts[0].strip('"'), case, wires, nodes)
+        return text
+    vals = fr.get("values", [])
+    if not vals:
+        return None
+    sel = next((a for a, b in wires if b == f"{case}.selector"), None)
+    is_str = (nodes.get(sel.partition(".")[0], {}).get("type") if sel else None) == "string"
+    if len(vals) == 1 and "," not in vals[0]:
+        return _case_value(vals[0], case, wires, nodes)
+    out = []
+    for v in vals:
+        lo, sep, hi = v.partition(", ")
+        if not sep:
+            out.append(f'"{v}"' if is_str else v)
+            continue
+        q = (lambda x: f'"{x}"') if is_str else (lambda x: x)
+        if "NegInfinity" in hi:  # "x, NegInfinity" = everything up to x
+            out.append(f"..{q(lo)}")
+        elif "Infinity" in hi:  # x and up
+            out.append(f"{q(lo)}..")
+        else:
+            out.append(f"{q(lo)}..{q(hi)}")
+    return ", ".join(out)
 
 
 def _case_value(v: str, case: str, wires, nodes):

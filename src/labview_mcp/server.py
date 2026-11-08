@@ -187,7 +187,8 @@ async def vi_create(
       {"name": "W", "type": "while_loop", "stop_if_true": true, ...}   terminals W.i, W.stop
       {"name": "C", "type": "case", "output_tunnels": ["t"], "cases": [
           {"value": true, ...contents}, {"value": 3}, {"value": "apple"}, {"default": true}]}
-          terminal C.selector. Values passing INTO a structure: wire the outer node straight to the
+          terminal C.selector. Several values or ranges in one frame use LabVIEW's case-name text:
+          {"value": "1..3, 5"}, {"value": "10.."}, {"value": "\"a\", \"b\""}. Values passing INTO a structure: wire the outer node straight to the
           inner node. Values leaving a loop: wire the inner node to the outer node (For Loops build
           an array, While Loops pass the last value). Values leaving a case: wire each frame's
           result to an output tunnel ("t"), then "t" to the destination.

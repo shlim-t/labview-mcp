@@ -50,6 +50,10 @@ def parse(b: bytes, at: int = 0) -> tuple[object, str, int]:
             ft, fn, p = parse(b, p)
             fields.append({"name": fn, "type": ft})
         t = "error" if [f["name"] for f in fields] == ["status", "code", "source"] else {"cluster": fields}
+    elif code == 0x70:
+        from .dfir import refnum_type
+        t = refnum_type(b[body:end], ">")
+        p = body + 8 if t.__class__ is str else end
     else:
         t = f"type_0x{code:02x}"
     name = ""

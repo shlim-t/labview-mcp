@@ -47,13 +47,14 @@ _ALIASES = {"double": "dbl", "float": "dbl", "float64": "dbl", "single": "sgl", 
 
 TYPE_HELP = ("Types: dbl, sgl, i8, i16, i32, i64, u8, u16, u32, u64, bool, string, path, error; "
              "enums as {\"enum\": [\"Init\", \"Run\", \"Stop\"]} (values are item names); "
+             "VI Server references as \"ref:Control\", \"ref:VI\", \"ref:Boolean[]\"; "
              "arrays by suffix (\"dbl[]\", \"string[][]\"); clusters as "
              "{\"cluster\": [{\"name\": \"a\", \"type\": \"dbl\"}, ...]}.")
 
 
 @dataclass
 class LVType:
-    kind: str                     # numeric name, "bool", "string", "path", "array", "cluster"
+    kind: str                     # numeric name, "bool", "string", "path", "array", "cluster", "refnum"
     elem: "LVType | None" = None  # array element
     dims: int = 0
     fields: "list[tuple[str, LVType]] | None" = None  # cluster elements
@@ -75,6 +76,9 @@ class LVType:
         elif self.kind == "cluster":
             code = 0x50
             body = struct.pack(">H", len(self.fields)) + b"".join(t.td(n) for n, t in self.fields)
+        elif self.kind == "refnum":  # VI Server refnum: kind 8, class number (items = [class name])
+            code = 0x70
+            body = struct.pack(">HHHH", 0x0008, VI_CLASSES[self.items[0]], 0x0004, 0)
         elif self.kind == "enum":  # U16 enum: item count, then the item names as Pascal strings
             code = 0x16
             names = [_lv_text(x) for x in self.items]
@@ -108,6 +112,8 @@ class LVType:
                 raise SpecError(f"value {v!r} does not fit type {k}: {e}") from None
         if k == "bool":
             return b"\x01" if v else b"\x00"
+        if k == "refnum":  # always Not a Refnum
+            return b"\x00" * 4
         if k == "enum":
             return struct.pack(">H", self.enum_index(v))
         if k == "string":
@@ -199,6 +205,11 @@ def parse_type(t: Any) -> LVType:
                 or len(set(items)) != len(items)):
             raise SpecError("enum type must be {\"enum\": [\"Init\", \"Run\", \"Stop\"]}: distinct, non-empty names")
         return LVType("enum", items=list(items))
+    if isinstance(t, dict) and "array" in t:  # {"array": <element type>, "dims": 1}, e.g. clusters
+        dims = t.get("dims", 1)
+        if not isinstance(dims, int) or not 1 <= dims <= 8:
+            raise SpecError("{\"array\": ..., \"dims\": n} needs dims 1..8")
+        return LVType("array", elem=parse_type(t["array"]), dims=dims)
     if isinstance(t, dict):
         fields = t.get("cluster")
         if not isinstance(fields, list) or not fields:
@@ -206,6 +217,14 @@ def parse_type(t: Any) -> LVType:
         return LVType("cluster", fields=[(str(f.get("name", "")), parse_type(f.get("type"))) for f in fields])
     if not isinstance(t, str):
         raise SpecError(f"bad type {t!r}. {TYPE_HELP}")
+    m = re.fullmatch(r"\s*ref:\s*([A-Za-z][\w ]*?)\s*((?:\[\])*)\s*", t)
+    if m:  # a VI Server reference, e.g. "ref:Control", "ref:VI", "ref:Boolean[]"
+        cls = next((c for c in VI_CLASSES if c.lower() == m.group(1).replace(" ", "").lower()), None)
+        if cls is None:
+            raise SpecError(f"unknown VI Server class in {t!r}; e.g. ref:Control, ref:VI, ref:Boolean "
+                            f"(classes: lv_class_properties lists any of {len(VI_CLASSES)})")
+        base, dims = LVType("refnum", items=[cls]), m.group(2).count("[]")
+        return LVType("array", elem=base, dims=dims) if dims else base
     s = t.strip().lower().replace(" ", "")
     dims = 0
     while s.endswith("[]"):

@@ -229,6 +229,27 @@ CASES = {
         "property_nodes": [{"name": "a", "class": "Application", "properties": ["App.Version"]}],
         "wires": [["a.App.Version", "ver"]],
     }, {}, {"version": lambda v: isinstance(v, str) and v[:2].isdigit()}),
+    # VI Server references as controls and constants (Not a Refnum by default)
+    "refnums": ({
+        "controls": [{"name": "c", "type": "ref:Control"}, {"name": "vis", "type": "ref:VI[]"}],
+        "indicators": [{"name": "v", "type": "bool"}, {"name": "nan", "type": "bool"},
+                       {"name": "e", "type": "error"}],  # wired, else the error opens a dialog
+        "constants": [{"name": "k", "type": "ref:VI"}],
+        "property_nodes": [{"name": "p", "class": "Control", "properties": ["Visible"]}],
+        "functions": [{"name": "n", "function": "Not A Number/Path/Refnum?"}],
+        "wires": [["c", "p.reference"], ["p.Visible", "v"], ["k", "n.number/path/refnum"],
+                  ["n.NaN/Path/Refnum?", "nan"], ["p.error out", "e"]],
+    }, {}, {"v": False, "nan": True}),
+    # several values and ranges in one case frame (LabVIEW's case-name syntax)
+    "case_multi": ({
+        "controls": [{"name": "n", "type": "i32", "default": 7}],
+        "indicators": [{"name": "o", "type": "string"}],
+        "structures": [{"name": "C", "type": "case", "output_tunnels": ["t"], "cases": [
+            {"value": "1..3", "constants": [{"name": "a", "type": "string", "value": "low"}]},
+            {"value": "5, 7, 9..", "constants": [{"name": "b", "type": "string", "value": "odd or big"}]},
+            {"default": True, "constants": [{"name": "d", "type": "string", "value": "other"}]}]}],
+        "wires": [["n", "C.selector"], ["a", "t"], ["b", "t"], ["d", "t"], ["t", "o"]],
+    }, {}, {"o": "odd or big"}),
 }
 
 # UI VIs wait for clicks, so they are checked by their structure instead of by running them.
