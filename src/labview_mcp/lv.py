@@ -1605,6 +1605,31 @@ class LabVIEW:
                 cache[path] = None
         return cache[path]
 
+    def vi_diff(self, path_a: str, path_b: str | None = None) -> dict:
+        """What changed from VI a (old) to VI b (new). Without b: from the newest vi_edit backup
+        (.lvmcp-backup/) of a to a itself."""
+        from . import diff
+        if path_b is None:
+            cur = Path(check_vi_path(path_a))
+            baks = sorted((cur.parent / ".lvmcp-backup").glob(f"{cur.stem}.*{cur.suffix}"),
+                          key=lambda p: p.stat().st_mtime)
+            if not baks:
+                raise LabVIEWError(f"no backup of {cur.name} in {cur.parent / '.lvmcp-backup'}; give path_b")
+            old, new = baks[-1], cur
+        else:
+            old, new = Path(check_vi_path(path_a)), Path(check_vi_path(path_b))
+        # LabVIEW holds one VI per name: read the old version from a copy with its own name, next to
+        # the new one so relative subVI paths still resolve.
+        tmp = new.parent / f"{new.stem}.lvmcp-diff-{time.time_ns()}{old.suffix}"
+        shutil.copy2(old, tmp)
+        try:
+            ga = self.vi_dump(str(tmp), "scan")
+        finally:
+            _try(lambda: tmp.unlink())
+        gb = self.vi_dump(str(new), "scan")
+        res = diff.diff(ga, gb)
+        return {"old": str(old), "new": str(new), **res}
+
     def _conpane_labels(self, path: str) -> list[str]:
         """Labels of the controls on a VI's connector pane, in terminal order, skipping unassigned
         terminals (the order DFIR numbers a subVI node's terminals). Works for locked VIs too: it

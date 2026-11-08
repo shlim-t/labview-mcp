@@ -4,7 +4,7 @@ An [MCP](https://modelcontextprotocol.io) server that lets AI coding agents — 
 
 LabVIEW source code is a binary, graphical format. Text-based coding agents can't open a `.vi` file. labview-mcp acts as the agent's eyes and hands: it drives your installed LabVIEW over its ActiveX server and returns what the agent needs as text, images, and values.
 
-> Status: **v0.19.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth, and **user interfaces**: front-panel styles (buttons, LEDs, knobs, gauges, charts), event structures (control and VI events, Timeout, event data), and Property and Invoke Nodes. Any existing VI can be read as a graph (`vi_dump`) and changed in place (`vi_edit`: remove, replace, and add code, including inside existing loops and case frames). **Projects and builds**: the agent can put VIs in a project, add application (EXE), packed-library, and source-distribution build specs, build them, and mass compile folders.
+> Status: **v0.20.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth, and **user interfaces**: front-panel styles (buttons, LEDs, knobs, gauges, charts), event structures (control and VI events, Timeout, event data), and Property and Invoke Nodes. Any existing VI can be read as a graph (`vi_dump`) and changed in place (`vi_edit`: remove, replace, and add code, including inside existing loops and case frames). **Projects and builds**: the agent can put VIs in a project, add application (EXE), packed-library, and source-distribution build specs, build them, and mass compile folders.
 
 ## What the agent can do
 
@@ -18,6 +18,7 @@ LabVIEW source code is a binary, graphical format. Text-based coding agents can'
 | `vi_run` | Sets inputs, runs the VI, and returns all front-panel values. **While the VI runs, it can operate the front panel as a user would**: click buttons, change values, and read indicators. A UI VI can therefore be tested end to end. It stops VIs that don't finish within the time limit. |
 | `vi_dump` | **The block diagram as a JSON graph**: every node (functions by palette name, constants with their values, subVIs, loops, case frames, tunnels, shift registers, property nodes) and every wire with its source and sinks. Works on any VI, including broken ones. |
 | `vi_edit` | **Changes an existing VI in place.** It removes nodes, adds code, and wires to existing controls, nodes, loops, and case frames (by `vi_dump` id). The rest of the diagram keeps its layout. It backs up the VI first, and reverts instead of saving if the result is broken or a wire could not be made. |
+| `vi_diff` | **What changed between two versions of a VI**: nodes added and removed, constant values, renamed or retyped controls, objects moved between structures, and wires added and removed. Objects are matched by their LabVIEW UID. Without a second path it compares the VI with its newest `vi_edit` backup, which shows exactly what an edit did. |
 | `lv_functions` | Searches the palette functions in your LabVIEW install by name. |
 | `lv_class_properties` | The properties of a VI Server class, such as Boolean, WaveformChart, or VI, **as LabVIEW itself lists them**. You can filter them by a word. Use the names in Property Nodes. |
 | `function_terminals` | Exact terminal names of a function, **verified against LabVIEW's scripting engine** so the agent wires them right the first time. |
@@ -309,7 +310,7 @@ agent ──MCP/stdio──▶ labview-mcp ──ActiveX (COM)──▶ LabVIEW.
 - [x] `vi_edit`: move objects, add and remove case frames, add shift registers to existing loops.
 - [ ] `vi_edit`: wrap existing code in a loop or structure.
 - [x] `vi_dump` for any VI (scan fallback), including broken ones and VIs with property nodes and event structures.
-- [ ] `vi_diff`: a semantic diff between two versions of a VI, for code review on binary files.
+- [x] `vi_diff`: a semantic diff between two versions of a VI, for code review on binary files.
 - [x] Projects: create, add files and build specs (EXE, packed library, source distribution), build, mass compile.
 - [ ] Installers, shared libraries (DLL), VI Analyzer, unit tests; creating libraries and classes.
 - [x] `vi_create`: new VIs with controls, constants, functions, subVIs, and wires.

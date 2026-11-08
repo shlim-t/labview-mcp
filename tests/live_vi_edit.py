@@ -252,5 +252,31 @@ loop = next(n["id"] for n in g["nodes"] if n["kind"] == "for_loop")
 r = call(lv.vi_edit, lp, {"move": {loop: [300, 200]}}, False, False)
 check("move", r.get("moved") == [loop] and r["exec_state"] == "idle", r)
 
+# vi_diff: what an edit changed (backup -> current)
+dv = os.path.join(D, "diffme.vi")
+call(lv.vi_create, dv, {"controls": [{"name": "x", "type": "dbl"}], "indicators": [{"name": "y", "type": "dbl"}],
+                        "constants": [{"name": "k", "type": "dbl", "value": 2}],
+                        "functions": [{"name": "m", "function": "Multiply"}],
+                        "wires": [["x", "m.x"], ["k", "m.y"], ["m.x*y", "y"]]}, True, "")
+g = call(lv.vi_dump, dv)
+kid = next(n["id"] for n in g["nodes"] if n["kind"] == "constant")
+yid = next(n["id"] for n in g["nodes"] if n.get("label") == "y")
+mid = next(n["id"] for n in g["nodes"] if n.get("function") == "Multiply")
+call(lv.vi_edit, dv, {"rename": {"x": "input"}, "values": {kid: 5},
+                      "disconnect": [yid], "existing": {"m": {"node": mid}, "o": "y"},
+                      "functions": [{"name": "inc", "function": "Increment"}],
+                      "wires": [["m.x*y", "inc.x"], ["inc.x+1", "o"]]}, True, False)
+d = call(lv.vi_diff, dv)
+print("   ", json.dumps(d, ensure_ascii=False)[:600])
+check("vi_diff after an edit",
+      any("Increment" in x for x in d.get("added", []))
+      and any("renamed to 'input'" in x for x in d.get("changed", []))
+      and any("2.0 -> 5.0" in x for x in d.get("changed", []))
+      and any("Multiply.x*y -> function Increment.x" in x for x in d.get("wires_added", []))
+      and any("Multiply.x*y -> indicator 'y'" in x for x in d.get("wires_removed", []))
+      and not d.get("removed"), d.get("summary"))
+same = call(lv.vi_diff, dv, dv)
+check("vi_diff of a VI with itself", same["summary"] == "no differences", same["summary"])
+
 print(f"{'all passed' if not failed else f'{failed} failed'}; files in {D}")
 sys.exit(1 if failed else 0)

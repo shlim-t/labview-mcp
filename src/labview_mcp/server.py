@@ -350,6 +350,17 @@ async def vi_edit(
 
 
 @mcp.tool()
+async def vi_diff(path_a: str, path_b: str | None = None) -> dict:
+    """What changed between two versions of a VI, as a list of semantic changes: nodes added and
+    removed, constants with new values, controls renamed or retyped, objects moved into another
+    structure or frame, and wires added and removed. path_a is the old version, path_b the new one.
+    Without path_b it compares the newest vi_edit backup of path_a (.lvmcp-backup/) with path_a, so
+    after vi_edit it shows exactly what the edit did. Objects are matched by their LabVIEW UID,
+    which survives edits. Neither file is changed."""
+    return await _run(lv.vi_diff, path_a, path_b)
+
+
+@mcp.tool()
 async def lv_functions(query: str) -> dict:
     """Search LabVIEW's palette functions by name (words match in any order), e.g. "array",
     "string length", "file". Use the exact name as "function" in vi_create, and call
