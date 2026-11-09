@@ -10,6 +10,8 @@ with property nodes or event structures. It does not see constant values.
 """
 from __future__ import annotations
 
+import collections
+
 import re
 from dataclasses import dataclass
 
@@ -34,6 +36,7 @@ _STRUCTS = {"ForLoop": "for_loop", "WhileLoop": "while_loop", "CaseStructure": "
 _MULTI_FRAME = {"case", "event_structure", "stacked_sequence", "disable_structure",
                 "conditional_disable", "flat_sequence", "type_specialization"}
 # parts of a node (a Property Node's items, a Formula Node's parameters): their terminals are the node's
+_NODE_STD_TERMS = {"reference", "reference out", "error in (no error)", "error in", "error out", "dup reference"}
 _PARTS = {"PropertyItem", "FormulaParameter", "ScriptNodeParameter", "MathScriptNodeParameter"}
 _SKIP = {"Wire", "Diagram", "TopLevelDiagram", "Text", "Label", "Decoration", "Joint", "Comment"}
 
@@ -117,10 +120,14 @@ def build(rows: list[Row], labels: dict[int, str]) -> dict:
             n["vi"] = labels.get(r.uid, "")
         elif r.cls in ("Property", "Invoke"):
             n["kind"] = "property_node" if r.cls == "Property" else "invoke_node"
-            items = [t.name for p in rows if p.owner == r.uid and p.cls == "PropertyItem"
-                     for t in rows if t.owner == p.uid and _is_terminal(t.cls) and t.name]
+            # item terminals belong to the node itself (next to reference / error terminals)
+            items = [(t.name, not t.source) for t in sorted(rows, key=lambda x: x.uid)
+                     if t.owner == r.uid and _is_terminal(t.cls) and t.name and t.name not in _NODE_STD_TERMS]
             if items:
-                n["items"] = list(dict.fromkeys(items))
+                n["items"] = list(dict.fromkeys(nm for nm, _ in items))
+                written = [nm for nm, w in items if w]
+                if written and r.cls == "Property":
+                    n["write"] = written
         else:
             n["kind"] = "function"
             n["function"] = labels.get(r.uid, r.cls)
@@ -141,6 +148,17 @@ def build(rows: list[Row], labels: dict[int, str]) -> dict:
                 n["in"] = w
             nodes.append(n)
 
+    dup: dict = collections.defaultdict(list)  # (owner, name, is source) -> terminal uids in diagram order
+    elem: dict[int, str] = {}  # Bundle / Unbundle terminals named after cluster elements -> "element[k]"
+    for t in rows:
+        if _is_terminal(t.cls) and t.name and t.owner in node_id:
+            fn = labels.get(t.owner, "") if t.owner in by_uid and by_uid[t.owner].cls not in ("Property", "Invoke") else ""
+            if (fn == "Bundle" and not t.source and t.name != "cluster") or (fn == "Unbundle" and t.source):
+                elem[t.uid] = "element"
+                dup[(t.owner, "element", t.source)].append(t.uid)
+            else:
+                dup[(t.owner, t.name, t.source)].append(t.uid)
+
     def term_name(t: Row) -> str:
         o = t.owner
         if by_uid.get(o) and by_uid[o].cls in _PARTS:
@@ -159,7 +177,13 @@ def build(rows: list[Row], labels: dict[int, str]) -> dict:
             nid = node_id[o]
             if by_uid.get(o) and by_uid[o].cls.endswith("Constant"):
                 return nid
-            return f"{nid}.{t.name}" if t.name else f"{nid}[uid {t.uid}]"
+            if not t.name:
+                return f"{nid}[uid {t.uid}]"
+            name = elem.get(t.uid, t.name)
+            same = dup.get((o, name, t.source))
+            if same and (len(same) > 1 or t.uid in elem):  # growable: "element" x n -> "element[1]", ...
+                return f"{nid}.{name}[{same.index(t.uid) + 1}]"
+            return f"{nid}.{name}"
         if o in container:  # loop iteration / count / condition terminals sit on the loop's diagram
             parent = by_uid.get(o)
             sid = node_id.get(parent.owner, "") if parent else ""

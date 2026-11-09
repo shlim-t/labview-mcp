@@ -223,6 +223,18 @@ CASES = {
                   ["C.i", "inc.x"], ["inc.x+1", "ge.x"], ["n", "ge.y"], ["ge.x >= y?", "C.stop"],
                   ["deq.queue out", "release.queue"]],
     }, {}, {"sum": 10.0}),
+    # nested properties ("Label.Text": Label, then Text.Text) next to a plain one, in that order,
+    # and a node linked to a restyled control (a slide's own property)
+    "prop_nested": ({
+        "controls": [{"name": "b", "type": "bool", "label": "my switch"}],
+        "indicators": [{"name": "t", "type": "string", "label": "label text"},
+                       {"name": "v", "type": "bool", "label": "label shown"},
+                       {"name": "c", "type": "dbl", "label": "slide", "style": "Vertical Fill Slide"},
+                       {"name": "n", "type": "u32", "label": "fill color"}],
+        "property_nodes": [{"name": "p", "control": "b", "properties": ["Label.Text", "Visible", "Label.Visible"]},
+                           {"name": "h", "control": "c", "properties": ["FillColor"]}],
+        "wires": [["p.Label.Text", "t"], ["p.Label.Visible", "v"], ["h.FillColor", "n"]],
+    }, {}, {"label text": "my switch", "label shown": True, "fill color": lambda v: isinstance(v, int)}),
     # an unlinked Property Node of class Application needs no reference
     "app_version": ({
         "indicators": [{"name": "ver", "type": "string", "label": "version"}],

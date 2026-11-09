@@ -253,6 +253,8 @@ _TERM_NAME_BAD = re.compile(r"[\x00-\x1f]|:\s*\d")
 _CONTENT_KEYS = ("constants", "functions", "subvis", "structures", "property_nodes", "invoke_nodes")
 _NODE_KINDS = ("pnode", "inode")
 # growable palette functions: their inputs are wired by position, element[i]
+# terminals the diagram shows under one name but Gen Script knows by another
+_SCRIPT_TERM_ALIASES = {("Index Array", "index"): "index (row)"}
 _GROWABLE_FUNCS = {"Concatenate Strings", "Build Array", "Bundle", "Unbundle", "Build Cluster Array",
                    "Index Array", "Array Subset", "Replace Array Subset", "Insert Into Array",
                    "Delete From Array", "Array To Cluster", "Merge Errors", "Compound Arithmetic"}  # Property / Invoke Nodes: configured after they are placed
@@ -309,7 +311,7 @@ NODE_HELP = (
     "a list writes those; the rest are read. invoke_nodes: {\"name\": \"m\", \"control\": \"graph\" | "
     "\"class\": \"VI\", \"method\": \"Run VI\"}. Wire them as \"p.Visible\", \"m.<parameter>\", "
     "\"p.reference\", \"p.error in\", \"p.error out\". Names are LabVIEW's short names (\"Visible\", "
-    "\"Value\", \"App.Version\").")
+    "\"Value\", \"App.Version\"); nested ones as LabVIEW shows them (\"Label.Text\", \"Plot.Plot Color\").")
 
 
 def _check_node(pn: dict, kind: str, b) -> None:
@@ -354,7 +356,7 @@ class Script:
     events: list = None
     # Property/Invoke Nodes made by this script: {"name", "out", "kind", "class", "items", "write": [index],
     # "control": spec name, "method"}; and the wires to them, drawn after they are configured: `late`
-    # (a Script binding its ends) with `late_refs` = ("out", k) | ("in", k) for each bound object.
+    # (a Script binding its ends) with `late_refs` = ("out", k, name) | ("in", k, name) for each bound object.
     pnodes: list = None
     late: "Script | None" = None
     late_refs: list = None
@@ -587,11 +589,14 @@ class _Builder:
             if not term:
                 raise SpecError(f"wire end {end!r}: give the terminal, e.g. \"{node}.x\"")
             if (k == "function" and term.startswith("element") and not re.fullmatch(r"element\[\d+\]", term)
-                    and (n.spec.get("size") is not None or n.spec["function"].strip() in _GROWABLE_FUNCS)):
+                    and (n.spec.get("size") is not None or n.spec["function"].strip() in _GROWABLE_FUNCS)
+                    and not (term == "element" and n.spec["function"].strip() == "Index Array")):
+                # (Index Array has one "element" output per index: a 1-D one has a single one)
                 # a bare "element" reference on a growable node has crashed LabVIEW
                 raise SpecError(f"wire end {end!r}: wire growable inputs by position as "
                                 f"\"{node}.element[1]\", \"{node}.element[2]\", ...")
-            return end
+            alias = _SCRIPT_TERM_ALIASES.get((str(n.spec.get("function", "")).strip(), term))
+            return f"{node}.{alias}" if alias else end
         if k in _STRUCT_TERMS:
             lv = _STRUCT_TERMS[k].get(term)
             if not lv:
@@ -1015,7 +1020,8 @@ def _plan_nodes(b: _Builder, late_raw: list, labels: dict):
             raise SpecError(f"a Property/Invoke Node cannot be wired to {nm!r} (a {n.kind}) yet; wire it "
                             "through a function or constant")
         existing.append({"name": nm, "kind": "existing" if n.kind in ("control", "indicator") else n.kind})
-        refs.append(("in", n.bind) if n.bind is not None else ("out", b.out_index.setdefault(nm, len(b.out_index))))
+        refs.append(("in", n.bind, nm) if n.bind is not None
+                    else ("out", b.out_index.setdefault(nm, len(b.out_index)), nm))
     late = build({"wires": late_raw}, existing=existing, edit=True)
     return pnodes, late, refs
 

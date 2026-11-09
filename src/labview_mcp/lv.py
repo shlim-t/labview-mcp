@@ -410,13 +410,21 @@ class LabVIEW:
             if len(out_refs) != len(script.outs):
                 raise LabVIEWError("LabVIEW did not return the references of the new objects")
             labels = script.labels
+            # a Property Node linked to a chart needs the chart's properties: restyle those controls
+            # first; the others last (a restyled control is a new object, so event frames bound to it
+            # would lose it)
+            linked = {labels.get(pn["control"], pn["control"]) for pn in script.pnodes or [] if pn.get("control")}
+            early = {k: v for k, v in (script.styles or {}).items() if k in linked}
+            if early:
+                self._apply_styles(target, early)
             self._finish_nodes(target, script, out_refs, [], labels,
                                lambda s, refs: self._gen_script(target, s.xml, s.type_strings, s.data_strings,
                                                                 refs=refs, raw=True))
             if script.events:
                 self._build_events(target, script.events, dict(zip(script.outs, out_refs)), labels)
-            if script.styles:
-                self._apply_styles(target, script.styles)
+            rest = {k: v for k, v in (script.styles or {}).items() if k not in early}
+            if rest:
+                self._apply_styles(target, rest)
             if later:
                 status, code, source = self._gen_script(target, "<Script>\n</Script>", [], [])  # Clean Up
         except LabVIEWError as e:
@@ -505,11 +513,21 @@ class LabVIEW:
                 # the control's own class, so its own properties (e.g. a chart's) are available
                 pn = dict(pn, **{"class": self._control_class(target, fp[label])})
             cls = "VI Server:" + pn["class"]
+            nested = []
             if pn["kind"] == "pnode":
+                if any("." in x for x in pn["items"]):
+                    # Set Properties[] refuses nested items ("Label.Text": Label, then Text.Text) and a
+                    # refused call leaves the node half-configured, so tell them apart first: a dotted
+                    # name the class lists ("App.Version") is a plain one.
+                    known = {q for p_ in _try(lambda: self.class_properties(pn["class"])["properties"], [])
+                             for q in (p_["name"], p_["long_name"], p_["data_name"])}
+                    nested = [i for i, x in enumerate(pn["items"]) if "." in x and x not in known]
                 h = self._helper(PROPCONFIG_VI)
                 h.SetControlValue("reference", ref)
                 h.SetControlValue("Property Node Class Name", cls)
-                h.SetControlValue("ID Strings[]", list(pn["items"]))
+                # nested items: the first part now, the full name below (PropertyItem.Property (Deprecated))
+                h.SetControlValue("ID Strings[]", [x.split(".")[0] if i in nested else x
+                                                   for i, x in enumerate(pn["items"])])
             else:
                 h = self._helper(INVOKECONFIG_VI)
                 h.SetControlValue("reference", ref)
@@ -526,24 +544,39 @@ class LabVIEW:
                 link.SetControlValue("control", fp[label])
                 self._run_checked(link, f"linking {what} to {label!r}")
             uid = self._uid_of(ref)
+            if nested or pn["write"]:
+                items = self._prop_items(ref)  # in node order (UIDs are not: the first item is the oldest)
+            if nested:
+                ps = self._helper(PROPITEMSET_VI)
+                for i in nested:
+                    ps.SetControlValue("item", items[i])
+                    ps.SetControlValue("name", pn["items"][i])
+                    ps.Run(False)
+                    if ps.GetControlValue("error out")[0]:
+                        raise LabVIEWError(_node_error(what, dict(pn, items=[pn["items"][i]]), 1077))
             if pn["write"]:
-                items = sorted(self._owned(target, "PropertyItem", uid))
+                items = self._prop_items(ref)
                 w = self._helper(PROPWRITE_VI)
                 for k in pn["write"]:
-                    w.SetControlValue("item", items[k][1])
+                    w.SetControlValue("item", items[k])
                     w.SetControlValue("write", True)
                     self._run_checked(w, f"making {pn['items'][k]!r} of {what} writable")
             # A terminal is named by LabVIEW, not always as the property was asked for (the item
             # "AllProps[]" has the terminal "AllProps2"); item terminals follow the item order.
             terms = [n for _, n in sorted(self._owned(target, "Terminal", uid, names=True))]
             node_terms[pn["name"]] = terms
-            item_terms = [n for n in terms if n not in _STD_TERMS]
+            item_terms = self._item_terminals(target, ref, uid) if pn["kind"] == "pnode" else []
             if pn["kind"] == "pnode" and len(item_terms) == len(pn["items"]):
                 for asked, real in zip(pn["items"], item_terms):
                     if asked != real:
                         rename[f"\"{pn['name']}.{asked}\""] = f"\"{pn['name']}.{real}\""
         if script.late is not None:
-            refs = [outs[k] if src == "out" else ins[k] for src, k in script.late_refs]
+            refs = [outs[k] if src == "out" else ins[k] for src, k, _ in script.late_refs]
+            if script.styles:  # a restyled control is a new object: bind it by its front-panel refnum
+                fp = self._fp_refs_by_label(target)
+                for i, (_, _, nm) in enumerate(script.late_refs):
+                    if labels.get(nm) in script.styles and labels[nm] in fp:
+                        refs[i] = fp[labels[nm]]
             late = script.late
             if rename:
                 xml = late.xml
@@ -559,6 +592,24 @@ class LabVIEW:
                                         for n, ts in node_terms.items()) + ".")
                 raise LabVIEWError(f"wiring the Property/Invoke Nodes failed (error {code}).{hint} "
                                    f"{_strip_html(str(msg))}")
+
+    def _prop_items(self, ref) -> list:
+        """A Property Node's items (PropertyItem refnums), top to bottom."""
+        h = self._helper(PROPITEMS_VI)
+        h.SetControlValue("reference", ref)
+        self._run_checked(h, "reading the items of a Property Node")
+        return list(h.GetControlValue("Property Items[]") or ())
+
+    def _item_terminals(self, target, ref, uid: int) -> list[str]:
+        """The terminal names of a Property Node's items, top to bottom."""
+        names = dict(self._owned(target, "Terminal", uid, names=True))
+        h = self._helper(ITEMTERM_VI)
+        out = []
+        for it in self._prop_items(ref):
+            h.SetControlValue("reference", it)
+            self._run_checked(h, "reading a Property Node item's terminal")
+            out.append(str(names.get(h.GetControlValue("UID"), "")))
+        return out
 
     def _uid_of(self, ref) -> int:
         u = self._helper(UID_VI)
@@ -1732,6 +1783,22 @@ class LabVIEW:
                 out.append(lab.GetControlValue("Object Label"))
         return out
 
+    def _control_classes(self, target, g: dict) -> None:
+        """The VI Server class of each front-panel control ("WaveformChart", "Slide", "Listbox"):
+        its data type alone does not say it is a chart or a listbox."""
+        h = self._helper(UIDS_VI)
+        h.SetControlValue("VI Refnum", target)
+        h.SetControlValue("Traverse Target", 0)  # front panel
+        h.SetControlValue("Class Name", "Control")
+        h.Run(False)
+        fp = self._fp_refs_by_label(target)
+        cls_of = dict(zip(h.GetControlValue("UIDs") or (), h.GetControlValue("Classes") or ()))
+        for n in g["nodes"]:
+            if n["kind"] in ("control", "indicator") and n.get("label") in fp:
+                c = cls_of.get(_try(lambda: self._uid_of(fp[n["label"]])))
+                if c:
+                    n["vi_class"] = str(c)
+
     def vi_dump(self, path: str, method: str = "auto") -> dict:
         """method: "dfir" (compiler export: constant values, but refuses some VIs), "scan" (walk the
         objects with VI Scripting: any VI, including broken ones, no constant values) or "auto"
@@ -1747,6 +1814,7 @@ class LabVIEW:
                 if any(n["kind"] == "constant" and "[]" in json.dumps(n.get("type", "")) for n in g["nodes"]):
                     self._fill_array_constants(path, g)
                 _try(lambda: self._real_terminal_names(g))
+                _try(lambda: self._control_classes(self._vi(str(path)), g))
                 return {"vi": str(path), "source": "dfir", **g}
             except LabVIEWError as e:
                 if method == "dfir" or "password-protected" in str(e):
@@ -1868,6 +1936,7 @@ class LabVIEW:
             labels[r.uid] = lab.GetControlValue("Object Label")
         g = scan.build(rows, labels)
         _try(lambda: self._scan_types(target, g, dict(zip((r.uid for r in rows), cols[6]))))
+        _try(lambda: self._control_classes(target, g))
         return g
 
     def _scan_types(self, target, g: dict, refs: dict) -> None:
@@ -1882,6 +1951,35 @@ class LabVIEW:
                     p = str(sp.GetControlValue("path") or "")
                     if p:
                         n["path"] = p
+        pi, ii = _try(lambda: self._helper(PNODEINFO_VI)), _try(lambda: self._helper(INODEINFO_VI))
+        for n in g["nodes"]:  # Property / Invoke Nodes: class, linked control, method
+            h = pi if n["kind"] == "property_node" else ii if n["kind"] == "invoke_node" else None
+            if h is None or n.get("uid") not in refs:
+                continue
+            h.SetControlValue("reference", refs[n["uid"]])
+            h.Run(False)
+            cls = str(h.GetControlValue("class name") or "")
+            if cls:
+                n["vi_class"] = cls.rsplit(":", 1)[-1].replace(" (strict)", "")
+            label = str(h.GetControlValue("label") or "")
+            if label and not h.GetControlValue("error out")[0]:
+                n["control"] = label
+            if n["kind"] == "property_node":
+                order = _try(lambda: self._item_terminals(target, refs[n["uid"]], n["uid"]))
+                if order and sorted(order) == sorted(n.get("items", [])):
+                    n["items"] = order  # node order (the scan lists terminals by UID)
+                # LabVIEW's names of each item, (ID, data name, short name, long name); an item whose
+                # terminal shows none of them is a nested one ("Label.Text": Label, then Text.Text)
+                props = list(_try(lambda: h.GetControlValue("Properties[]"), ()) or ())
+                if props and len(props) == len(n.get("items", [])):
+                    n["properties"] = [str(p[2]) for p in props]
+                    nested = [t for t, p in zip(n["items"], props) if t not in (p[1], p[2], p[3])]
+                    if nested:
+                        n["nested"] = nested
+            if n["kind"] == "invoke_node":
+                m = _try(lambda: h.GetControlValue("Method"))  # (ID, data name, short name, long name)
+                if m and len(m) >= 3 and m[2]:
+                    n["method"] = str(m[2])
         cn = _try(lambda: self._helper(CASENAMES_VI))
         for n in g["nodes"]:  # case frames: LabVIEW's own case names ("1..3, 5", "Default")
             if cn is not None and n["kind"] == "case" and n.get("uid") in refs and n.get("frames"):
@@ -1946,6 +2044,11 @@ CTLTYPE_VI = VIS_DIR / "lvmcp_ctltype.vi"
 CONPANE_VI = VIS_DIR / "lvmcp_conpane.vi"
 SUBVIPATH_VI = VIS_DIR / "lvmcp_subvipath.vi"
 CASENAMES_VI = VIS_DIR / "lvmcp_casenames.vi"
+PNODEINFO_VI = VIS_DIR / "lvmcp_pnodeinfo.vi"
+PROPITEMSET_VI = VIS_DIR / "lvmcp_propitemset.vi"
+PROPITEMS_VI = VIS_DIR / "lvmcp_propitems.vi"
+ITEMTERM_VI = VIS_DIR / "lvmcp_itemterm.vi"
+INODEINFO_VI = VIS_DIR / "lvmcp_inodeinfo.vi"
 SETCASENAMES_VI = VIS_DIR / "lvmcp_setcasenames.vi"
 REMOVEFRAME_VI = VIS_DIR / "lvmcp_removeframe.vi"
 SETPOS_VI = VIS_DIR / "lvmcp_setpos.vi"
@@ -1985,7 +2088,7 @@ def _node_error(what: str, pn: dict, code: int) -> str:
         names = pn["items"] if pn["kind"] == "pnode" else [pn["method"]]
         return (f"{what}: class {pn['class'] or 'Control'} has no {'property' if pn['kind'] == 'pnode' else 'method'} "
                 f"named {names}. lv_class_properties({pn['class'] or 'Control'!r}) lists its properties; "
-                "sub-properties such as \"Label.Text\" are not listed but may work by their short name.")
+                "a nested one is written with a dot, as LabVIEW shows it (\"Label.Text\", \"Plot.Plot Color\").")
     return f"configuring {what} failed (error {code})"
 
 

@@ -261,7 +261,10 @@ async def vi_create(
     an unlinked node (wire a reference into "p.reference"; Application needs none). Properties are
     read unless "write" is true or lists them. Wire "p.Visible", "i.<parameter>", "p.error in",
     "p.error out"; chain error wires to order nodes. Names are LabVIEW's short names ("Visible",
-    "Value", "DefVal", "Disabled", "App.Version", method "Reinit To Dflt").
+    "Value", "DefVal", "Disabled", "App.Version", method "Reinit To Dflt"). Nested properties are
+    written as LabVIEW shows them: "Label.Text", "Plot.Plot Color", "YScale.Multiplier"; wire them
+    the same way ("p.Label.Text"). A node linked to a chart, slide, listbox, ... needs that control's
+    "style" ("Waveform Chart", "Vertical Fill Slide", "Listbox") so the control has those properties.
     The diagram is tidied with LabVIEW's Clean Up Diagram."""
     res = await _run(lv.vi_create, path, spec, overwrite, description)
     ui = bool(res.get("event_frames") or res.get("styled"))
@@ -286,7 +289,10 @@ async def vi_dump(path: str, method: str = "auto") -> dict:
     palette name, subVIs, loops, cases and their frames, tunnels, shift registers, property/invoke
     nodes), which diagram it sits in ("in": a structure id, "case_4#1" = frame 1), and every wire
     with its source and sinks as "node.terminal". Node ids are what vi_edit's "remove" and
-    "existing" take; dump again after each edit.
+    "existing" take; dump again after each edit. Controls carry their front-panel class
+    ("vi_class": "WaveformChart", "Slide", ...). Property Nodes carry "vi_class", the linked
+    "control" label if any, "items" (terminal names, top to bottom) and "write"; Invoke Nodes
+    their "method".
 
     "source" says how it was read. method="auto" first uses LabVIEW's compiler export ("dfir": adds
     wire data types and case frame values, but refuses VIs with some controls or nodes), then

@@ -15,6 +15,13 @@ from . import gen
 
 # dump function names that are LabVIEW class names rather than palette names
 FUNCTION_ALIASES = {"ArrayIndexNode": "Index Array"}
+# front-panel classes whose look is not given by the data type -> a Controls palette name (vi_create
+# "style"); the plain ones (Digital, Boolean, String, Cluster, Array, Enum, Path) need none
+CONTROL_STYLES = {"Slide": "Vertical Fill Slide", "XYGraph": "XY Graph", "Ring": "Text Ring",
+                  "IntensityGraph": "Intensity Graph", "WaveformGraph": "Waveform Graph",
+                  "WaveformChart": "Waveform Chart", "ComboBox": "Combo Box", "Table": "Table",
+                  "ListBox": "Listbox", "MulticolumnListbox": "Multicolumn Listbox", "Knob": "Knob",
+                  "Scrollbar": "Vertical Scrollbar", "TabControl": "Tab Control", "TreeControl": "Tree"}
 _STRUCT = {"for_loop": "for_loop", "while_loop": "while_loop", "case": "case"}
 
 
@@ -88,6 +95,9 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
                 c = {"name": nid, "type": _type(n.get("type"), k)}
                 if n.get("label"):
                     c["label"] = n["label"]
+                if n.get("vi_class") in CONTROL_STYLES:
+                    c["style"] = CONTROL_STYLES[n["vi_class"]]
+                    features.add("control style")
                 if where:
                     features.add("terminal inside a structure")
                 (controls if k == "control" else indicators).append(c)
@@ -116,6 +126,10 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
                 if k == "case":
                     st["_frames"] = n.get("frames", [])
                 contents[where]["structures"].append(st)
+            elif k in ("property_node", "invoke_node"):
+                contents[where]["property_nodes" if k == "property_node" else "invoke_nodes"].append(
+                    _pnode(n, g["nodes"]))
+                features.add(k.replace("_", " "))
             elif k == "tunnel":
                 tunnels[nid] = n
             elif k in ("shift_register_left", "shift_register_right"):
@@ -145,10 +159,17 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
     edges = [(w["from"], s) for w in g["wires"] for s in w["to"] if w.get("from") and s]
     if any(not w.get("from") for w in g["wires"]):
         bad("wire: source unknown")
+    def direction(tid, t):  # the scan reader gives none: an input tunnel is wired into on the outside
+        if t.get("direction"):
+            return t["direction"]
+        if any(b == f"{tid}.outer" for _, b in edges) or any(a.startswith(f"{tid}.inner") for a, _ in edges):
+            return "input"
+        return "output"
+
     case_out = {}
     for tid, t in tunnels.items():
         st = nodes.get(t.get("structure"), {})
-        if st.get("kind") == "case" and t.get("direction") == "output":
+        if st.get("kind") == "case" and direction(tid, t) == "output":
             case_out[tid] = f"t_{tid}"
         elif st.get("kind") not in ("for_loop", "while_loop", "case"):
             bad(f"tunnel of a {st.get('kind')}")
@@ -158,7 +179,7 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
             features.add("auto-indexing")
 
     def side(tid, t):  # (entry end, exit end) of a tunnel
-        return (f"{tid}.outer", f"{tid}.inner") if t.get("direction") == "input" else (f"{tid}.inner", f"{tid}.outer")
+        return (f"{tid}.outer", f"{tid}.inner") if direction(tid, t) == "input" else (f"{tid}.inner", f"{tid}.outer")
 
     for _ in range(20):  # collapse tunnels (nested structures chain them)
         changed = False
@@ -188,7 +209,7 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
     sizes = collections.defaultdict(int)
     for a, b in wires:
         for e in (a, b):
-            m = re.match(r"([^.]+)\.element\[(\d+)\]$", e)
+            m = re.match(r"([^.]+)\.(?:element|value|string|error in)\[(\d+)\]$", e)
             if m:
                 sizes[m.group(1)] = max(sizes[m.group(1)], int(m.group(2)))
     for d in contents.values():
@@ -238,6 +259,37 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
     return spec, sorted(set(unsupported)), sorted(features)
 
 
+def _pnode(n: dict, all_nodes) -> dict:
+    """A dumped Property / Invoke Node as a vi_create property_nodes / invoke_nodes entry."""
+    d = {"name": n["id"]}
+    if n.get("control"):
+        term = next((x["id"] for x in all_nodes if x["kind"] in ("control", "indicator")
+                     and x.get("label") == n["control"]), None)
+        if term is None:
+            raise _Unsupported(f"{n['kind']}: linked control has no terminal")
+        d["control"] = term
+    elif n.get("vi_class"):
+        d["class"] = n["vi_class"]
+    else:
+        raise _Unsupported(f"{n['kind']}: class unknown")
+    if n["kind"] == "property_node":
+        if not n.get("items"):
+            raise _Unsupported("property_node: properties unknown")
+        # LabVIEW's short names configure the node, a nested item keeps its dotted terminal name;
+        # wires use the terminal names (vi_create maps them)
+        short = n.get("properties") or n["items"]
+        d["properties"] = [t if t in n.get("nested", []) else p for t, p in zip(n["items"], short)]
+        w = [d["properties"][i] for i, x in enumerate(n["items"]) if x in n.get("write", [])
+             and i < len(d["properties"])]
+        if w:
+            d["write"] = True if len(w) == len(d["properties"]) else w
+    else:
+        if not n.get("method"):
+            raise _Unsupported("invoke_node: method unknown")
+        d["method"] = n["method"]
+    return d
+
+
 def _map_end(e: str, nodes, sr_name, case_out, role: str) -> str:
     node, term = _end(e)
     if node in case_out:
@@ -250,10 +302,17 @@ def _map_end(e: str, nodes, sr_name, case_out, role: str) -> str:
         raise _Unsupported("wire: unknown end")
     if n["kind"] in ("control", "indicator", "constant"):
         return node
+    if n["kind"] in ("property_node", "invoke_node"):
+        if not term:
+            raise _Unsupported(f"{n['kind']} terminal without a name")
+        return f"{node}.{term}"
     if re.search(r"\[\d+\]$", node) or (not term and n["kind"] in ("function", "subvi")):
         raise _Unsupported(f"{n['kind']} terminal without a name")
     if n["kind"] == "subvi" and not term:
         raise _Unsupported("subVI terminal without a name")
+    fn = FUNCTION_ALIASES.get(n.get("function"), n.get("function"))
+    if n["kind"] == "function" and term == "element" and fn in gen._GROWABLE_FUNCS and fn != "Index Array":
+        term = "element[1]"  # the scan reader numbers "element" only when there are several
     if re.search(r":\s*\d", term):  # e.g. Random Number's "number: 0 to 1"
         raise _Unsupported("terminal name with \":<number>\" (not wireable by script)")
     return f"{node}.{term}" if term else node
@@ -319,6 +378,8 @@ def signature(g: dict) -> dict:
             k = f"subvi:{Path(n.get('path', '')).name}"
         elif k == "constant":
             k = f"constant:{json.dumps(n.get('value'))[:40]}"
+        elif k in ("property_node", "invoke_node"):
+            k = f"{k}:{n.get('control') or n.get('vi_class')}:{n.get('method') or ','.join(n.get('items', []))}"
         kinds[k] += 1
     tun = {n["id"] for n in g["nodes"] if n["kind"] == "tunnel"}
     conn = sum(1 for w in g["wires"] for s in w["to"]

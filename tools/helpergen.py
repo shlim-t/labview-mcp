@@ -424,10 +424,64 @@ HELPERS["lvmcp_eventsel"] = {
     "wires": [("reference", "p.reference"), ("p.EventSelectors", "selectors"), ("p.error out", "error out")],
 }
 
+# Property / Invoke Node: its VI Server class, the front-panel control it is linked to (an implicit
+# node; empty label and an error for a node with a reference terminal), and an Invoke Node's method
+HELPERS["lvmcp_pnodeinfo"] = {
+    "controls": [("reference", "ref:Property")],
+    "indicators": [("class name", "string"), ("label", "string"), ("error out", "error")],
+    "nodes": [{"name": "p", "kind": "property", "class": "Property", "items": ["PropClassName", "Props[]", "LinkedControl"]},
+              {"name": "c", "kind": "property", "class": "Control", "items": ["Label"]},
+              {"name": "t", "kind": "property", "class": "Text", "items": ["Text"]}],
+    "wires": [("reference", "p.reference"), ("p.ClassName", "class name"), ("p.LinkedControl", "c.reference"),
+              ("p.error out", "c.error in (no error)"), ("c.Label", "t.reference"), ("c.error out", "t.error in (no error)"),
+              ("t.Text", "label"), ("t.error out", "error out")],
+    "term_indicators": [("p", "Props2")],
+}
+HELPERS["lvmcp_inodeinfo"] = {
+    "controls": [("reference", "ref:Invoke")],
+    "indicators": [("class name", "string"), ("label", "string"), ("error out", "error")],
+    "nodes": [{"name": "p", "kind": "property", "class": "Invoke", "items": ["MethClassName", "Method", "LinkedControl"]},
+              {"name": "c", "kind": "property", "class": "Control", "items": ["Label"]},
+              {"name": "t", "kind": "property", "class": "Text", "items": ["Text"]}],
+    "wires": [("reference", "p.reference"), ("p.ClassName", "class name"),
+              ("p.LinkedControl", "c.reference"), ("p.error out", "c.error in (no error)"),
+              ("c.Label", "t.reference"), ("c.error out", "t.error in (no error)"),
+              ("t.Text", "label"), ("t.error out", "error out")],
+    "term_indicators": [("p", "Method")],
+}
+
+# PropertyItem.Property (Deprecated) (write, ID 6DE8DC01): set an item by name, including a nested
+# one such as "Label.Text" or "Plot.Plot Color" (Set Properties[] refuses those, error 1077)
+HELPERS["lvmcp_propitemset"] = {
+    "controls": [("item", "ref:PropertyItem"), ("name", "string")],
+    "indicators": [("error out", "error")],
+    "nodes": [{"name": "w", "kind": "property", "class": "PropertyItem", "items": ["6DE8DC01"], "write": True}],
+    "wires": [("item", "w.reference"), ("name", "w.Property"), ("w.error out", "error out")],
+}
+
+# Property.Property Items[]: a Property Node's items in node order (their UIDs are not in order)
+HELPERS["lvmcp_propitems"] = {
+    "controls": [("reference", "ref:Property")],
+    "indicators": [("error out", "error")],
+    "nodes": [{"name": "p", "kind": "property", "class": "Property", "items": ["PropItems[]"]}],
+    "wires": [("reference", "p.reference"), ("p.error out", "error out")],
+    "term_indicators": [("p", "Prop Items[]")],
+}
+
+# PropertyItem.Terminal -> UID: which terminal of the node belongs to an item
+HELPERS["lvmcp_itemterm"] = {
+    "controls": [("reference", "ref:PropertyItem")],
+    "indicators": [("UID", "i32"), ("error out", "error")],
+    "nodes": [{"name": "p", "kind": "property", "class": "PropertyItem", "items": ["Terminal"]},
+              {"name": "u", "kind": "property", "class": "GObject", "items": ["UID"]}],
+    "wires": [("reference", "p.reference"), ("p.Terminal", "u.reference"), ("p.error out", "u.error in (no error)"),
+              ("u.UID", "UID"), ("u.error out", "error out")],
+}
+
 ORDER = ["lvmcp_move", "lvmcp_propwrite", "lvmcp_proplink", "lvmcp_invokelink", "lvmcp_uid", "lvmcp_classname",
          "lvmcp_allprops", "lvmcp_signal", "lvmcp_fire", "lvmcp_timeoutterm", "lvmcp_eventsel", "lvmcp_termconst", "lvmcp_outcnt", "lvmcp_consttype", "lvmcp_ctltype", "lvmcp_termind", "lvmcp_conpane", "lvmcp_subvipath", "lvmcp_relabel", "lvmcp_constvalue",
          "lvmcp_rep", "lvmcp_constrep", "lvmcp_casenames", "lvmcp_setcasenames",
-         "lvmcp_removeframe", "lvmcp_setpos", "lvmcp_autoerr"]
+         "lvmcp_removeframe", "lvmcp_setpos", "lvmcp_autoerr", "lvmcp_pnodeinfo", "lvmcp_inodeinfo", "lvmcp_propitemset", "lvmcp_propitems", "lvmcp_itemterm"]
 
 
 def main(args: list[str]) -> None:
