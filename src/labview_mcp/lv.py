@@ -433,6 +433,14 @@ class LabVIEW:
             target._FlagAsMethod("MakeCurValueDefault")
             target.MakeCurValueDefault()
         _try(lambda: setattr(target, "FPWinTitle", p.stem))  # blank template carries its own title
+        # LabVIEW's automatic error handling turns an unwired error into a modal dialog, which blocks
+        # LabVIEW (and vi_run) until someone clicks it: off unless the spec asks for it
+        if not spec.get("auto_error_handling", False):
+            h = _try(lambda: self._helper(AUTOERR_VI))
+            if h is not None:
+                h.SetControlValue("reference", target)
+                h.SetControlValue("enabled", False)
+                _try(lambda: h.Run(False))
         if description:
             target.Description = description
         target.SaveInstrument(str(p), False, False)
@@ -1807,6 +1815,7 @@ CASENAMES_VI = VIS_DIR / "lvmcp_casenames.vi"
 SETCASENAMES_VI = VIS_DIR / "lvmcp_setcasenames.vi"
 REMOVEFRAME_VI = VIS_DIR / "lvmcp_removeframe.vi"
 SETPOS_VI = VIS_DIR / "lvmcp_setpos.vi"
+AUTOERR_VI = VIS_DIR / "lvmcp_autoerr.vi"
 RELABEL_VI = VIS_DIR / "lvmcp_relabel.vi"
 CONSTVALUE_VI = VIS_DIR / "lvmcp_constvalue.vi"
 REP_VI = VIS_DIR / "lvmcp_rep.vi"

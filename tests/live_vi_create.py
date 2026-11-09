@@ -240,6 +240,13 @@ CASES = {
         "wires": [["c", "p.reference"], ["p.Visible", "v"], ["k", "n.number/path/refnum"],
                   ["n.NaN/Path/Refnum?", "nan"], ["p.error out", "e"]],
     }, {}, {"v": False, "nan": True}),
+    # an unwired error (Not a Refnum into a Property Node) must not open LabVIEW's automatic error
+    # dialog, which would block LabVIEW and hang this run
+    "no_error_dialog": ({
+        "controls": [{"name": "c", "type": "ref:Control"}], "indicators": [{"name": "v", "type": "bool"}],
+        "property_nodes": [{"name": "p", "class": "Control", "properties": ["Visible"]}],
+        "wires": [["c", "p.reference"], ["p.Visible", "v"]],
+    }, {}, {"v": False}),
     # several values and ranges in one case frame (LabVIEW's case-name syntax)
     "case_multi": ({
         "controls": [{"name": "n", "type": "i32", "default": 7}],

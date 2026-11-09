@@ -148,6 +148,10 @@ async def vi_run(
     e.g. [{"set": {"x": 21}}, {"read": ["y"]}, {"click": "Go"}, {"click": "STOP"}] tests a UI
     end to end; the result's "actions" lists what each step did and read.
     A VI still running after timeout_s is aborted (typical for UI loops waiting on a Stop button).
+    A modal dialog (a One Button Dialog, or LabVIEW's automatic error dialog for an unwired error
+    in a VI that has automatic error handling on) blocks LabVIEW until someone answers it, and this
+    call with it. VIs made by vi_create have automatic error handling off; in other VIs wire error
+    outputs before running them.
     WARNING: executes code and may drive real hardware — only run VIs the user asked to run."""
     return await _run(lv.vi_run, path, inputs or {}, outputs, timeout_s, actions)
 
@@ -247,6 +251,8 @@ async def vi_create(
            "function": "Multiply"}], "constants": [{"name": "k", "type": "dbl", "value": 2}]}]}]}],
        "wires": [["stop", "W.stop"], ["x", "m.x"], ["k", "m.y"], ["m.x*y", "y"]]}
     Test a UI with vi_run's "actions" (click buttons, set values, read indicators while it runs).
+    The new VI has LabVIEW's automatic error handling off, so an unwired error does not open a
+    dialog that would block LabVIEW; "auto_error_handling": true in the spec keeps it on.
     Property and Invoke Nodes (top level, in loops, cases and event frames):
       "property_nodes": [{"name": "p", "control": "chart", "properties": ["Visible"], "write": true},
                          {"name": "a", "class": "Application", "properties": ["App.Version"]}],

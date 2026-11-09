@@ -880,7 +880,7 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
     vi_edit. New controls then stay off the connector pane unless they ask for a slot."""
     if not isinstance(spec, dict):
         raise SpecError("spec must be an object")
-    unknown = set(spec) - {"controls", "indicators", "wires", "existing", *_CONTENT_KEYS}
+    unknown = set(spec) - {"controls", "indicators", "wires", "existing", "auto_error_handling", *_CONTENT_KEYS}
     if unknown:
         raise SpecError(f"unknown spec keys: {sorted(unknown)}")
     b = _Builder()

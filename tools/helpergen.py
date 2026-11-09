@@ -401,6 +401,14 @@ HELPERS["lvmcp_setpos"] = {
     "nodes": [{"name": "w", "kind": "property", "class": "GObject", "items": ["Position"], "write": True}],
     "wires": [("reference", "w.reference"), ("position", "w.Position"), ("w.error out", "error out")],
 }
+# VI.Automatic Error Handling (write): off for generated VIs, so an unwired error does not open a
+# modal dialog (which blocks LabVIEW and hangs vi_run)
+HELPERS["lvmcp_autoerr"] = {
+    "controls": [("reference", "ref:VI"), ("enabled", "bool")],
+    "indicators": [("error out", "error")],
+    "nodes": [{"name": "w", "kind": "property", "class": "VI", "items": ["Auto Err Handling"], "write": True}],
+    "wires": [("reference", "w.reference"), ("enabled", "w.Def Err Handling"), ("w.error out", "error out")],
+}
 # EventStructure.Timeout Terminal: the terminal to wire the timeout (ms) to
 HELPERS["lvmcp_timeoutterm"] = {
     "controls": [("reference", "ref:EventStructure")],
@@ -419,7 +427,7 @@ HELPERS["lvmcp_eventsel"] = {
 ORDER = ["lvmcp_move", "lvmcp_propwrite", "lvmcp_proplink", "lvmcp_invokelink", "lvmcp_uid", "lvmcp_classname",
          "lvmcp_allprops", "lvmcp_signal", "lvmcp_fire", "lvmcp_timeoutterm", "lvmcp_eventsel", "lvmcp_termconst", "lvmcp_outcnt", "lvmcp_consttype", "lvmcp_ctltype", "lvmcp_termind", "lvmcp_conpane", "lvmcp_subvipath", "lvmcp_relabel", "lvmcp_constvalue",
          "lvmcp_rep", "lvmcp_constrep", "lvmcp_casenames", "lvmcp_setcasenames",
-         "lvmcp_removeframe", "lvmcp_setpos"]
+         "lvmcp_removeframe", "lvmcp_setpos", "lvmcp_autoerr"]
 
 
 def main(args: list[str]) -> None:
