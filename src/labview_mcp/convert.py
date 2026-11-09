@@ -254,6 +254,8 @@ def _map_end(e: str, nodes, sr_name, case_out, role: str) -> str:
         raise _Unsupported(f"{n['kind']} terminal without a name")
     if n["kind"] == "subvi" and not term:
         raise _Unsupported("subVI terminal without a name")
+    if re.search(r":\s*\d", term):  # e.g. Random Number's "number: 0 to 1"
+        raise _Unsupported("terminal name with \":<number>\" (not wireable by script)")
     return f"{node}.{term}" if term else node
 
 

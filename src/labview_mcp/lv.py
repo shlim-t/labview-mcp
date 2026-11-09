@@ -807,6 +807,41 @@ class LabVIEW:
             out.append([" ".join(str(x).split()) for x in sel.GetControlValue("selectors") or ()])
         return out
 
+    def node_terminals(self, name: str, size: int | None = None) -> list[tuple[str, bool]] | None:
+        """The terminals LabVIEW gives a palette function when it is placed: (name, is_output), in
+        the node's order. None if the function cannot be placed by scripting. Cached per process."""
+        cache = self.__dict__.setdefault("_node_terms", {})
+        key = (name, size)
+        if key in cache:
+            return cache[key]
+        vi = self._probe_vi()
+        self._probe_n += 1
+        k = self._probe_n
+        if size is None:
+            xml = f"<Function name=\"n{k}\" style={quoteattr(name)} position=\"(0,0)\" out=\"0\"></Function>"
+        else:
+            tag = "BuildArray" if name.lower() == "build array" else "GrowableFunction"
+            xml = (f"<{tag} name=\"n{k}\" style={quoteattr(name)} size=\"{size}\" position=\"(0,0)\" "
+                   f"out=\"0\"></{tag}>")
+        status, _, _ = self._gen_script(vi, f"<Script>{xml}</Script>", [], [])
+        out = list(self._gen_out) if not status else []
+        if status or not out:
+            cache[key] = None
+            return None
+        node = out[0]
+        uid = self._uid_of(node)
+        h = self._helper(UIDS_VI)
+        h.SetControlValue("VI Refnum", vi)
+        h.SetControlValue("Traverse Target", 1)
+        h.SetControlValue("Class Name", "Terminal")
+        h.Run(False)
+        terms = sorted((u, n, bool(src)) for u, o, n, src in zip(
+            h.GetControlValue("UIDs") or (), h.GetControlValue("Owner UIDs") or (),
+            h.GetControlValue("Names") or (), h.GetControlValue("Is Source") or ()) if o == uid)
+        _try(lambda: self._delete(vi, [node]))
+        cache[key] = [(n, src) for _, n, src in terms]
+        return cache[key]
+
     def _probe_vi(self):
         """A scratch VI kept in memory (never saved) for probing terminal names."""
         if getattr(self, "_probe", None) is None:
@@ -865,6 +900,17 @@ class LabVIEW:
             if code == 0 and cand.lower() not in {v.lower() for v in verified}:
                 verified.append(cand)
         res = {"function": name, "size": size, "terminals": verified, "help_labels": labels}
+        real = _try(lambda: self.node_terminals(name, size))
+        if real:
+            res["inputs"] = [n for n, out in real if not out]
+            res["outputs"] = [n for n, out in real if out]
+            for n, _ in real:
+                if n not in verified and not _TERM_UNSCRIPTABLE.search(n):
+                    verified.append(n)
+            bad = [n for n, _ in real if _TERM_UNSCRIPTABLE.search(n)]
+            if bad:
+                res["unwireable"] = (f"{bad}: LabVIEW's script parser reads \":<number>\" in a terminal "
+                                     "name as a position, so these cannot be wired by name")
         if size is None and catalog.is_growable(labels):
             res["growable"] = (
                 "this node grows. size is LabVIEW's internal count and means different things per function "
@@ -1669,6 +1715,7 @@ class LabVIEW:
                 g = dfir.parse(text, catalog.load(self.app.ApplicationDirectory), self._connector_labels)
                 if any(n["kind"] == "constant" and "[]" in json.dumps(n.get("type", "")) for n in g["nodes"]):
                     self._fill_array_constants(path, g)
+                _try(lambda: self._real_terminal_names(g))
                 return {"vi": str(path), "source": "dfir", **g}
             except LabVIEWError as e:
                 if method == "dfir" or "password-protected" in str(e):
@@ -1677,6 +1724,62 @@ class LabVIEW:
                 "note": "read by walking the diagram objects: constant values are not included, and "
                         "case frames are numbered in creation order",
                 **self._scan(path)}
+
+    def _real_terminal_names(self, g: dict) -> None:
+        """DFIR names a function's terminals from LabVIEW's Context Help ("number (0 to 1)"); the
+        terminals themselves may be named differently ("number: 0 to 1"). Rename wire ends to the
+        real names when they match ignoring spaces and punctuation."""
+        def norm(x):
+            return re.sub(r"[^a-z0-9]", "", x.lower())
+        from . import catalog
+        labels_of = catalog.load(self.app.ApplicationDirectory)
+        funcs = {n["id"]: n for n in g["nodes"] if n["kind"] == "function" and n.get("function")}
+        used: dict[str, dict[str, bool]] = {}  # node -> wired label -> is an output
+        for w in g["wires"]:
+            for e, is_out in [(w.get("from"), True)] + [(t, False) for t in w["to"]]:
+                node, _, term = (e or "").partition(".")
+                if node in funcs and term and not term.startswith("element["):
+                    used.setdefault(node, {})[term] = is_out
+        fixes: dict[str, dict[str, str]] = {}
+        for node, terms in used.items():
+            f = funcs[node]
+            real = self.node_terminals(f["function"], f.get("size"))
+            if not real:
+                continue
+            names = {n for n, _ in real}
+            fx = {}
+            def base(x):
+                return norm(x.split("(")[0])
+            for term in terms:
+                if term in names:
+                    continue
+                for same in (lambda n: norm(n) == norm(term),                 # punctuation only
+                             lambda n: norm(n).startswith(norm(term)),        # "error in (no error)"
+                             lambda n: base(n) == base(term) and base(term)):  # "default (0L)"
+                    hits = [n for n, o in real if same(n) and o == terms[term]]
+                    if len(hits) == 1:
+                        fx[term] = hits[0]
+                        break
+            # Still unmatched (help text differs: "element data type" / "notification data type"):
+            # pair them when exactly one wired label and one real terminal of that direction remain.
+            known = {norm(x) for x in labels_of.get(f["function"], [])}
+            for out in (False, True):
+                left = [t for t, o in terms.items() if o == out and t not in names and t not in fx]
+                free = [n for n, o in real if o == out and norm(n) not in known
+                        and n not in fx.values() and n not in terms]
+                if len(left) == 1 and len(free) == 1:
+                    fx[left[0]] = free[0]
+            if fx:
+                fixes[node] = fx
+
+        def fix(e):
+            node, dot, term = (e or "").partition(".")
+            return f"{node}.{fixes[node][term]}" if node in fixes and term in fixes[node] else e
+        if fixes:
+            for w in g["wires"]:
+                w["from"] = fix(w.get("from"))
+                w["to"] = [fix(t) for t in w["to"]]
+            g["unwired_inputs"] = [fix(t) for t in g.get("unwired_inputs", [])]
 
     def _fill_array_constants(self, path: str, g: dict) -> None:
         """The DFIR export leaves array constants empty; read constant values with VI Scripting.
@@ -1824,6 +1927,8 @@ CONSTREP_VI = VIS_DIR / "lvmcp_constrep.vi"
 _REPRESENTATION = {"ext": 0, "dbl": 1, "sgl": 2, "i32": 3, "i16": 4, "i8": 5, "u32": 6, "u16": 7, "u8": 8,
                    "cxt": 9, "cdb": 10, "csg": 11, "i64": 12, "u64": 13}
 _STD_TERMS = {"reference", "reference out", "error in (no error)", "error out"}
+# ":<number>" in a terminal name is read by the script parser as a position (and has crashed LabVIEW)
+_TERM_UNSCRIPTABLE = re.compile(r":\s*\d")
 _ANY_STYLE = 4294967295  # GObject.Replace "Style": -1 as U32, find the object by its palette name
 _REMOVE_CORE = Path("vi.lib") / "Utility" / "QuickDropSupport" / "Remove and Rewire Objects_core.vi"
 # vi_dump node kinds that vi_edit can bind or remove -> gen kinds
