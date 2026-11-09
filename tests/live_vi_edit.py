@@ -278,5 +278,23 @@ check("vi_diff after an edit",
 same = call(lv.vi_diff, dv, dv)
 check("vi_diff of a VI with itself", same["summary"] == "no differences", same["summary"])
 
+# vi_test: many input sets at once, with one wrong expectation that must be reported
+st = os.path.join(D, "stats.vi")
+call(lv.vi_create, st, {"controls": [{"name": "x", "type": "dbl[]"}],
+                        "indicators": [{"name": "sum", "type": "dbl"}, {"name": "n", "type": "i32"}],
+                        "functions": [{"name": "s", "function": "Add Array Elements"},
+                                      {"name": "z", "function": "Array Size"}],
+                        "wires": [["x", "s.numeric array"], ["s.sum", "sum"], ["x", "z.array"], ["z.size(s)", "n"]]},
+     True, "")
+res = call(lv.vi_test, st, [
+    {"name": "three", "inputs": {"x": [1, 2, 3]}, "expect": {"sum": 6, "n": 3}},
+    {"name": "empty", "inputs": {"x": []}, "expect": {"sum": 0, "n": 0}},
+    {"name": "float", "inputs": {"x": [0.1, 0.2]}, "expect": {"sum": 0.3}, "tol": 1e-12},
+    {"name": "wrong on purpose", "inputs": {"x": [1, 1]}, "expect": {"sum": 3}},
+], 10, 1e-9)
+bad = [c for c in res["cases"] if not c["passed"]]
+check("vi_test", res["summary"] == "3/4 cases passed" and [c["case"] for c in bad] == ["wrong on purpose"]
+      and bad[0]["mismatches"]["sum"] == {"expected": 3, "got": 2.0}, json.dumps(res)[:400])
+
 print(f"{'all passed' if not failed else f'{failed} failed'}; files in {D}")
 sys.exit(1 if failed else 0)

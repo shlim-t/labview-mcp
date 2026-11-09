@@ -12,7 +12,7 @@ from mcp.client.stdio import stdio_client
 
 EXPECTED = {"lv_status", "vi_info", "vi_text", "vi_snapshot", "vi_hierarchy", "vi_run", "vi_dump", "vi_edit",
             "vi_create", "lv_functions", "function_terminals", "lv_class_properties",
-            "project_info", "project_create", "project_add", "project_build", "lv_mass_compile", "vi_diff"}
+            "project_info", "project_create", "project_add", "project_build", "lv_mass_compile", "vi_diff", "vi_test"}
 
 
 async def main() -> int:

@@ -1659,6 +1659,37 @@ class LabVIEW:
                 cache[path] = None
         return cache[path]
 
+    def vi_test(self, path: str, cases: list, timeout_s: float = 30.0, tol: float = 1e-9) -> dict:
+        """Run a VI once per case ({"name", "inputs", "expect", "tol"}) and compare the outputs."""
+        if not isinstance(cases, list) or not cases:
+            raise LabVIEWError("cases is a list of {\"inputs\": {...}, \"expect\": {label: value}}")
+        rows, passed = [], 0
+        for i, c in enumerate(cases):
+            if not isinstance(c, dict) or not isinstance(c.get("expect"), dict) or not c["expect"]:
+                raise LabVIEWError(f"case {i}: needs \"expect\": {{indicator label: value, ...}}")
+            name = c.get("name") or f"case {i + 1}"
+            row: dict = {"case": name}
+            try:
+                r = self.vi_run(path, c.get("inputs") or {}, list(c["expect"]), timeout_s)
+            except LabVIEWError as e:
+                row.update(passed=False, error=str(e)[:300])
+                rows.append(row)
+                continue
+            got = r.get("values", {})
+            bad = {}
+            for label, want in c["expect"].items():
+                if not _matches(got.get(label), want, c.get("tol", tol)):
+                    bad[label] = {"expected": want, "got": got.get(label)}
+            if not r.get("completed", True):
+                bad["(run)"] = {"expected": "the VI finishes", "got": f"aborted after {timeout_s} s"}
+            row["passed"] = not bad
+            if bad:
+                row["mismatches"] = bad
+            passed += not bad
+            rows.append(row)
+        return {"vi": path, "passed": passed, "failed": len(rows) - passed,
+                "summary": f"{passed}/{len(rows)} cases passed", "cases": rows}
+
     def vi_diff(self, path_a: str, path_b: str | None = None) -> dict:
         """What changed from VI a (old) to VI b (new). Without b: from the newest vi_edit backup
         (.lvmcp-backup/) of a to a itself."""
@@ -1982,6 +2013,18 @@ def _byte_strings(items: list[bytes]):
     from win32com.client import VARIANT
     return VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_VARIANT,
                    [VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_UI1, b) for b in items])
+
+
+def _matches(got, want, tol: float) -> bool:
+    """Compare a front-panel value with an expected one: numbers within tol (relative to the
+    expected size, at least absolute tol), lists/clusters element by element, others exactly."""
+    if isinstance(want, bool) or isinstance(got, bool):
+        return got is not None and bool(got) == bool(want)
+    if isinstance(want, (int, float)) and isinstance(got, (int, float)):
+        return abs(got - want) <= tol * max(1.0, abs(want))
+    if isinstance(want, (list, tuple)) and isinstance(got, (list, tuple)):
+        return len(got) == len(want) and all(_matches(g, w, tol) for g, w in zip(got, want))
+    return got == want
 
 
 def _try(fn, default=None):

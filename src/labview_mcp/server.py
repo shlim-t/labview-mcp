@@ -357,6 +357,18 @@ async def vi_edit(
 
 
 @mcp.tool()
+async def vi_test(path: str, cases: list[dict], timeout_s: float = 30.0, tol: float = 1e-9) -> dict:
+    """Test a VI against many input sets at once: run it once per case and compare the outputs.
+    cases: [{"name": "zero gain", "inputs": {"Gain": 0, "x": 5}, "expect": {"y": 0}},
+            {"inputs": {"x": [1, 2]}, "expect": {"sum": 3.0, "mean": 1.5}, "tol": 1e-6}, ...]
+    Numbers match within tol (relative to the expected value, at least absolute tol), arrays and
+    clusters (lists) element by element, strings and booleans exactly. Returns "summary"
+    ("9/10 cases passed") and per case "passed" with the mismatches (expected vs got) or the error.
+    Same rules as vi_run: it executes code; only test VIs the user asked to run."""
+    return await _run(lv.vi_test, path, cases, timeout_s, tol)
+
+
+@mcp.tool()
 async def vi_diff(path_a: str, path_b: str | None = None) -> dict:
     """What changed between two versions of a VI, as a list of semantic changes: nodes added and
     removed, constants with new values, controls renamed or retyped, objects moved into another

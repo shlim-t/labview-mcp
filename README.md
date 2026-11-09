@@ -4,7 +4,7 @@ An [MCP](https://modelcontextprotocol.io) server that lets AI coding agents — 
 
 LabVIEW source code is a binary, graphical format. Text-based coding agents can't open a `.vi` file. labview-mcp acts as the agent's eyes and hands: it drives your installed LabVIEW over its ActiveX server and returns what the agent needs as text, images, and values.
 
-> Status: **v0.23.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth, and **user interfaces**: front-panel styles (buttons, LEDs, knobs, gauges, charts), event structures (control and VI events, Timeout, event data), and Property and Invoke Nodes. Any existing VI can be read as a graph (`vi_dump`) and changed in place (`vi_edit`: remove, replace, and add code, including inside existing loops and case frames). **Projects and builds**: the agent can put VIs in a project, add application (EXE), packed-library, and source-distribution build specs, build them, and mass compile folders.
+> Status: **v0.24.0.** Reading and running work on any VI. Creating VIs supports controls, constants, functions, subVIs, For/While loops, shift registers, and case structures, nested to any depth, and **user interfaces**: front-panel styles (buttons, LEDs, knobs, gauges, charts), event structures (control and VI events, Timeout, event data), and Property and Invoke Nodes. Any existing VI can be read as a graph (`vi_dump`) and changed in place (`vi_edit`: remove, replace, and add code, including inside existing loops and case frames). **Projects and builds**: the agent can put VIs in a project, add application (EXE), packed-library, and source-distribution build specs, build them, and mass compile folders.
 
 ## What the agent can do
 
@@ -16,6 +16,7 @@ LabVIEW source code is a binary, graphical format. Text-based coding agents can'
 | `vi_snapshot` | PNG images of the block diagram, front panel, or connector pane. `all_frames=true` renders **every hidden case, sequence, and event frame**. |
 | `vi_hierarchy` | The subVI call tree. vi.lib, user.lib, and instr.lib are hidden by default. |
 | `vi_run` | Sets inputs, runs the VI, and returns all front-panel values. **While the VI runs, it can operate the front panel as a user would**: click buttons, change values, and read indicators. A UI VI can therefore be tested end to end. It stops VIs that don't finish within the time limit. |
+| `vi_test` | **Tests a VI against many input sets at once** and returns a pass/fail table: numbers within a tolerance, arrays and clusters element by element, and for each failure the expected and actual values. |
 | `vi_dump` | **The block diagram as a JSON graph**: every node (functions by palette name, constants with their values, subVIs, loops, case frames, tunnels, shift registers, property nodes) and every wire with its source and sinks. Works on any VI, including broken ones. |
 | `vi_edit` | **Changes an existing VI in place.** It removes nodes, adds code, and wires to existing controls, nodes, loops, and case frames (by `vi_dump` id). The rest of the diagram keeps its layout. It backs up the VI first, and reverts instead of saving if the result is broken or a wire could not be made. |
 | `vi_diff` | **What changed between two versions of a VI**: nodes added and removed, constant values, renamed or retyped controls, objects moved between structures, and wires added and removed. Objects are matched by their LabVIEW UID. Without a second path it compares the VI with its newest `vi_edit` backup, which shows exactly what an edit did. |
@@ -33,6 +34,7 @@ Example prompts:
 - "Explain what `Main.vi` does, case by case."
 - "Which subVIs write to the `Config` global?"
 - "Run `Scale.vi` with gain 2.5 and check `out` matches my Python reference."
+- "Test `Stats.vi` with an empty array, one value, and 1000 random values."
 - "Make a VI that takes an array of readings and returns their sum and mean, then test it."
 - "In `Scale.vi`, also output `Gain` squared, then run it."
 - "Make a panel with a knob, a gauge, a Double button and a STOP button."
