@@ -34,6 +34,33 @@ def _type(t, what: str):
     return t
 
 
+def _safe_ids(g: dict) -> dict:
+    """vi_dump ids made from labels can start with a digit ("1d_anova_215"); spec names cannot."""
+    bad = {n["id"] for n in g["nodes"] if not re.match(r"[A-Za-z_]", n["id"])}
+    if not bad:
+        return g
+    fix = lambda x: f"n_{x}" if x in bad else x  # noqa: E731
+
+    def end(e):
+        if not e:
+            return e
+        node, dot, term = e.partition(".")
+        m = re.match(r"(.*?)(\[.*\])$", node)
+        if m and m.group(1) in bad:
+            return f"n_{node}{dot}{term}"
+        return f"{fix(node)}{dot}{term}"
+    nodes = []
+    for n in g["nodes"]:
+        n = dict(n, id=fix(n["id"]))
+        for k in ("in", "structure", "pair"):
+            if isinstance(n.get(k), str):
+                sid, hash_, fr = n[k].partition("#")
+                n[k] = fix(sid) + hash_ + fr
+        nodes.append(n)
+    wires = [dict(w, **{"from": end(w.get("from")), "to": [end(t) for t in w["to"]]}) for w in g["wires"]]
+    return {**g, "nodes": nodes, "wires": wires}
+
+
 def _end(e: str) -> tuple[str, str]:
     node, _, term = e.partition(".")
     return node, term
@@ -41,6 +68,7 @@ def _end(e: str) -> tuple[str, str]:
 
 def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list[str]]:
     """Returns (spec, unsupported reasons, features used)."""
+    g = _safe_ids(g)
     nodes = {n["id"]: n for n in g["nodes"]}
     unsupported: list[str] = []
     features: set[str] = set()
@@ -139,9 +167,11 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
                 continue
             entry, exit_ = side(tid, t)
             ins = [a for a, b in edges if b == entry]
-            outs = [b for a, b in edges if a == exit_]
+            # a case's input tunnel has one inner end per frame: "tunnel_3.inner[frame 1]"
+            outs = [b for a, b in edges if a == exit_ or a.startswith(exit_ + "[")]
             if ins or outs:
-                edges = [(a, b) for a, b in edges if b != entry and a != exit_]
+                edges = [(a, b) for a, b in edges if b != entry and a != exit_
+                         and not a.startswith(exit_ + "[")]
                 edges += [(a, b) for a in ins for b in outs]
                 changed = True
         if not changed:
@@ -202,6 +232,8 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
             d["structures"] = sts
         return d
 
+    for c in controls + indicators:  # the connector pane is not compared; 12+ terminals would not fit
+        c["connector"] = False
     spec = {"controls": controls, "indicators": indicators, **fill(""), "wires": wires}
     return spec, sorted(set(unsupported)), sorted(features)
 
