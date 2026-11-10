@@ -424,6 +424,8 @@ class LabVIEW:
             self._finish_nodes(target, script, out_refs, [], labels,
                                lambda s, refs: self._gen_script(target, s.xml, s.type_strings, s.data_strings,
                                                                 refs=refs, raw=True))
+            if script.ref_wires:
+                self._connect_by_ref(target, script.ref_wires, out_refs)
             if script.events:
                 self._build_events(target, script.events, dict(zip(script.outs, out_refs)), labels)
             rest = {k: v for k, v in (script.styles or {}).items() if k not in early}
@@ -643,6 +645,41 @@ class LabVIEW:
             if u == uid:
                 return str(c)
         return "Control"
+
+    def _connect_by_ref(self, target, ref_wires: list, outs: list) -> None:
+        """Draw wires between terminal references (Terminal.Connect Wire): for terminals whose names a
+        script cannot use ("new element/subarray", "number: 0 to 1")."""
+        h = self._helper(UIDS_VI)
+        h.SetControlValue("VI Refnum", target)
+        h.SetControlValue("Traverse Target", 1)
+        h.SetControlValue("Class Name", "Terminal")
+        h.Run(False)
+        rows = list(zip(h.GetControlValue("UIDs") or (), h.GetControlValue("Owner UIDs") or (),
+                        h.GetControlValue("Names") or (), h.GetControlValue("Classes") or (),
+                        h.GetControlValue("References") or ()))
+
+        def term(end):
+            kind, k, name = end
+            if kind == "label":  # a front-panel object's block-diagram terminal
+                hits = [r for _, _, n, c, r in rows if c == "ControlTerminal" and n == k]
+                what = f"the terminal of {k!r}"
+            else:
+                uid = self._uid_of(outs[k])
+                own = [(n, r) for _, o, n, _, r in sorted(rows, key=lambda x: x[0]) if o == uid]
+                hits = [r for n, r in own if n == name or not name]
+                m = re.fullmatch(r"(.*)\[(\d+)\]", name)
+                if not hits and m:  # "index[2]": the 2nd terminal named "index", in node order
+                    same = [r for n, r in own if n == m.group(1)]
+                    hits = same[int(m.group(2)) - 1:int(m.group(2))] if int(m.group(2)) >= 1 else []
+                what = f"terminal {name!r}" + (f" (the node has {[n for n, _ in own]})" if own else "")
+            if len(hits) != 1:
+                raise LabVIEWError(f"wiring by terminal reference: cannot find {what}")
+            return hits[0]
+        c = self._helper(CONNECT_VI)
+        for a, z in ref_wires:
+            c.SetControlValue("reference", term(z))
+            c.SetControlValue("other", term(a))
+            self._run_checked(c, f"wiring {a[2] or a[1]!r} to {z[2] or z[1]!r}")
 
     def _owned(self, target, cls: str, owner: int, names: bool = False) -> list:
         """(uid, refnum) — or (uid, name) — of the objects of a class whose owner has UID `owner`."""
@@ -2174,6 +2211,7 @@ EVENTSEL_VI = VIS_DIR / "lvmcp_eventsel.vi"
 TERMCONST_VI = VIS_DIR / "lvmcp_termconst.vi"
 OUTCNT_VI = VIS_DIR / "lvmcp_outcnt.vi"
 UNBNAMES_VI = VIS_DIR / "lvmcp_unbnames.vi"
+CONNECT_VI = VIS_DIR / "lvmcp_connect.vi"
 BUNNAMES_VI = VIS_DIR / "lvmcp_bunnames.vi"
 CONSTTYPE_VI = VIS_DIR / "lvmcp_consttype.vi"
 CTLTYPE_VI = VIS_DIR / "lvmcp_ctltype.vi"

@@ -72,6 +72,10 @@ def worker(out: Path, paths: list[str]) -> None:
             (out / "dumps").mkdir(exist_ok=True)
             (out / "dumps" / f"{key(p)}.json").write_text(json.dumps(g), encoding="utf-8")
         except Exception as e:
+            if "-2147023174" in str(e) or "-2147023170" in str(e):
+                # LabVIEW is gone (RPC server unavailable): not this VI's fault; let the parent restart
+                print(f"LabVIEW lost at {p.name}; restarting", flush=True)
+                sys.exit(3)
             res["dump"] = {"ok": False, "error": str(e)[:300]}
             g = None
         if g is not None:
@@ -81,7 +85,9 @@ def worker(out: Path, paths: list[str]) -> None:
                 res.update(stage="converter error", error=f"{type(e).__name__}: {str(e)[:200]}")
         res["seconds"] = round(time.time() - t0, 1)
         f.parent.mkdir(parents=True, exist_ok=True)
-        f.write_text(json.dumps(res), encoding="utf-8")
+        tmp = f.with_suffix(".tmp")
+        tmp.write_text(json.dumps(res), encoding="utf-8")
+        tmp.replace(f)  # never leave a half-written result when the worker is killed
         print(json.dumps({"vi": p.name, "dump": res["dump"]["ok"], "stage": res.get("stage")}), flush=True)
 
 
@@ -129,6 +135,8 @@ def run(args):
                     {"vi": cur, "category": p.relative_to(EXAMPLES).parts[0], "dump": {"ok": False,
                      "error": "hang (LabVIEW stopped responding, e.g. a dialog)"}}), encoding="utf-8")
                 break
+        if w.poll() == 3:  # the worker lost LabVIEW: start from a fresh one
+            kill_labview()
         done_before = len(done)
 
 

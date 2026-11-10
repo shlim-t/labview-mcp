@@ -264,6 +264,18 @@ CASES = {
         "functions": [{"name": "f", "function": "To Double Precision Float"}],
         "wires": [["k", "f.number"], ["f.double precision float", "o"], ["k", "ts"]],
     }, {}, {"seconds": 100.0}),
+    # terminal names a script cannot use ("/" in them): wired by terminal reference
+    "slash_terms": ({
+        "controls": [{"name": "x", "type": "dbl", "default": 9}],
+        "indicators": [{"name": "o", "type": "dbl[]", "label": "replaced"},
+                       {"name": "d", "type": "dbl[]", "label": "rest"}],
+        "constants": [{"name": "k", "type": "dbl[]", "value": [1, 2, 3]},
+                      {"name": "i", "type": "i32", "value": 1}],
+        "functions": [{"name": "r", "function": "Replace Array Subset"},
+                      {"name": "f", "function": "Delete From Array"}],
+        "wires": [["k", "r.array"], ["i", "r.index"], ["x", "r.new element/subarray"], ["r.output array", "o"],
+                  ["k", "f.array"], ["i", "f.index"], ["f.array w/ subset deleted", "d"]],
+    }, {}, {"replaced": [1.0, 9.0, 3.0], "rest": [1.0, 3.0]}),
     # Unbundle By Name / Bundle By Name: elements chosen by name, in any order
     "by_name": ({
         "controls": [{"name": "c", "type": {"cluster": [{"name": "alpha", "type": "dbl"},

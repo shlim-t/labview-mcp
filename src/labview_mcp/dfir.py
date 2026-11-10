@@ -126,6 +126,8 @@ class TypeTable:
         td = self.tds[i]
         k = td["kind"]
         if k == "array":
+            if not 1 <= td["dims"] <= 64:  # a misread descriptor
+                return "?"
             inner = self.describe(td["elem"], depth + 1)
             return (inner + "[]" * td["dims"]) if isinstance(inner, str) else {"array": inner, "dims": td["dims"]}
         if k == "cluster":
@@ -213,8 +215,21 @@ _NODE_NAMES = {"ConcatenateNode": "Concatenate Strings", "BuildArrayNode": "Buil
                "ReplaceArrayNode": "Replace Array Subset", "ArraySubsetNode": "Array Subset",
                "InsertIntoArrayNode": "Insert Into Array", "InitArrayNode": "Initialize Array", "RandomNumber0To1Primitive": "Random Number (0-1)",
                "GetDateOrTimeInSecondsPrimitive": "Get Date/Time In Seconds"}
+# Array nodes whose DFIR terminals are only numbered: index -> terminal name (1-D forms, measured
+# on LabVIEW 2026 by wiring each terminal of a scripted node to its own control or indicator)
+_INDEXED_TERMS = {
+    "ArrayIndexNode": ["array", "element", "index"],
+    "InitArrayNode": ["element", "initialized array", "dimension size"],
+    "ArraySubsetNode": ["array", "subarray", "index", "length"],
+    "ReplaceArrayNode": ["array", "output array", "index", "new element/subarray"],
+    "DeleteArrayNode": ["array", "length", "array w/ subset deleted", "deleted portion", "index"],
+    "ReshapeArrayNode": ["array", "output array", "dimension size"],
+}
 # Growable nodes: DFIR terminal i is what vi_create calls element[i].
 _GROWABLE = {"ConcatenateNode", "BuildArrayNode", "UnbundleNode", "BundleNode"}
+# DFIR terminal 0 of a growable node (the elements follow; Bundle: cluster, output cluster, elements)
+_GROWABLE_T0 = {"ConcatenateNode": "concatenated string", "BuildArrayNode": "appended array",
+                "UnbundleNode": "cluster"}
 _PRINTF = ["format string", "initial string", "resulting string", "error in", "error out"]
 
 
@@ -370,11 +385,13 @@ def parse(text: str, catalog: dict[str, list[str]] | None = None, subvi_terms=No
                     if "LoopCondition::" in rest:
                         node["condition"] = re.search(r"LoopCondition::(\w+)", rest).group(1)
                     structures[ref] = node
-                elif ccls == "SubVI" or "SubVI" in ccls:
+                elif ccls == "SubVI" or "SubVI" in ccls or ccls == "PolyVI":
                     node["kind"] = "subvi"
-                    pm = _PATH.search(rest)
-                    if pm:
-                        node["path"] = pm.group(1).replace("\\\\", "\\")
+                    paths = [m.replace("\\\\", "\\") for m in _PATH.findall(rest)]
+                    if paths:
+                        node["path"] = paths[0]  # a polymorphic VI's node: the instance it calls
+                    if ccls == "PolyVI" and len(paths) > 1:
+                        node["polymorphic"] = paths[1]
                 else:
                     node["kind"] = "function"
                     name = _NODE_NAMES.get(ccls) or _palette_name(ccls, catalog)
@@ -449,7 +466,18 @@ def parse(text: str, catalog: dict[str, list[str]] | None = None, subvi_terms=No
         if labels and n.get("class", "").endswith("Primitive") and t < len(labels):
             return f"{n['id']}.{labels[t]}"
         if n.get("class") in _GROWABLE:
+            # vi_dump's element[k] is the k-th element terminal (1-based), as the scan reader names it
+            if n["class"] == "BundleNode":
+                return f"{n['id']}." + ("cluster" if t == 0 else "output cluster" if t == 1 else f"element[{t - 1}]")
+            if t == 0:
+                return f"{n['id']}." + _GROWABLE_T0[n["class"]]
             return f"{n['id']}.element[{t}]"
+        if n.get("class") == "ArrayIndexNode" and n.get("_nterms", 0) > 3:
+            # a grown Index Array (1-D): array, then element k and index k in turn
+            return f"{n['id']}." + ("array" if t == 0 else f"element[{(t + 1) // 2}]" if t % 2 else f"index[{t // 2}]")
+        cls = n.get("class")
+        if cls in _INDEXED_TERMS and t < len(_INDEXED_TERMS[cls]) and n.get("_nterms", 0) <= len(_INDEXED_TERMS[cls]):
+            return f"{n['id']}.{_INDEXED_TERMS[n['class']][t]}"
         if n.get("class") == "PrintfNode":
             return f"{n['id']}." + (_PRINTF[t] if t < len(_PRINTF) else f"input {t - len(_PRINTF) + 1}")
         if k in ("control", "indicator", "constant", "structure_terminal"):
@@ -485,6 +513,10 @@ def parse(text: str, catalog: dict[str, list[str]] | None = None, subvi_terms=No
     def _ref_of(node_id):
         return next((r for r, v in nodes.items() if v.get("id") == node_id), "")
 
+    for src, st_, dst, dt, o, ln in conns:  # highest terminal index wired per node (a grown node has more)
+        for ref, t in ((src, st_), (dst, dt)):
+            if ref in nodes:
+                nodes[ref]["_nterms"] = max(nodes[ref].get("_nterms", 0), int(t) + 1)
     edges: dict[str, dict] = {}
     unwired = []
     for src, st_, dst, dt, o, ln in conns:
@@ -505,6 +537,7 @@ def parse(text: str, catalog: dict[str, list[str]] | None = None, subvi_terms=No
     for ref in order:
         n = dict(nodes[ref])
         n.pop("_labels", None)
+        n.pop("_nterms", None)
         n.pop("_owner", None)
         n.pop("class", None) if n.get("kind") in ("control", "indicator", "constant") else None
         if not n.get("in"):

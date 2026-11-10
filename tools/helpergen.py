@@ -347,6 +347,14 @@ HELPERS["lvmcp_termctl"] = {
     "nodes": [{"name": "k", "kind": "invoke", "class": "Terminal", "method": "Create Control"}],
     "wires": [("reference", "k.reference"), ("k.error out", "error out")],
 }
+# Terminal.Connect Wire: a wire between two terminals given by reference (terminals whose names a
+# script cannot use: "new element/subarray", "number: 0 to 1", unnamed ones)
+HELPERS["lvmcp_connect"] = {
+    "controls": [("reference", "ref:Terminal"), ("other", "ref:Terminal")],
+    "indicators": [("error out", "error")],
+    "nodes": [{"name": "k", "kind": "invoke", "class": "Terminal", "method": "Connect Wire"}],
+    "wires": [("reference", "k.reference"), ("other", "k.Wire Source"), ("k.error out", "error out")],
+}
 # VI.Connector Pane -> ConnectorPane.Controls[]: the front-panel controls in connector-terminal order
 # (unassigned terminals give Not a Refnum); readable for password-protected VIs too
 HELPERS["lvmcp_conpane"] = {
@@ -524,7 +532,7 @@ ORDER = ["lvmcp_move", "lvmcp_propwrite", "lvmcp_proplink", "lvmcp_invokelink", 
          "lvmcp_allprops", "lvmcp_signal", "lvmcp_fire", "lvmcp_timeoutterm", "lvmcp_eventsel", "lvmcp_termconst", "lvmcp_outcnt", "lvmcp_consttype", "lvmcp_ctltype", "lvmcp_termind", "lvmcp_termctl", "lvmcp_conpane", "lvmcp_subvipath", "lvmcp_relabel", "lvmcp_constvalue",
          "lvmcp_rep", "lvmcp_constrep", "lvmcp_casenames", "lvmcp_setcasenames",
          "lvmcp_removeframe", "lvmcp_setpos", "lvmcp_autoerr", "lvmcp_pnodeinfo", "lvmcp_inodeinfo", "lvmcp_propitemset", "lvmcp_propitems", "lvmcp_itemterm",
-         "lvmcp_unbnames", "lvmcp_bunnames"]
+         "lvmcp_unbnames", "lvmcp_bunnames", "lvmcp_connect"]
 
 
 def main(args: list[str]) -> None:

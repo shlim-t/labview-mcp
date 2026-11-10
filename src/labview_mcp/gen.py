@@ -241,6 +241,8 @@ def parse_type(t: Any) -> LVType:
                             f"(classes: lv_class_properties lists any of {len(VI_CLASSES)})")
         base, dims = LVType("refnum", items=[cls]), m.group(2).count("[]")
         return LVType("array", elem=base, dims=dims) if dims else base
+    if len(t) > 200:
+        raise SpecError(f"bad type {t[:40]!r}... {TYPE_HELP}")
     s = t.strip().lower().replace(" ", "")
     dims = 0
     while s.endswith("[]"):
@@ -266,11 +268,18 @@ _TERM_BAD = re.compile(r"[:\x00-\x1f]")
 # In a terminal name a colon is fine ("s? t:f", Select's output) except as "name:<number>", which
 # LabVIEW's script parser takes as a terminal index and has crashed on.
 _TERM_NAME_BAD = re.compile(r"[\x00-\x1f]|:\s*\d")
+# terminal names a script cannot wire ("name:<number>"): wired by terminal reference instead
+_TERM_BY_REF = re.compile(r":\s*\d")
 _CONTENT_KEYS = ("constants", "functions", "subvis", "structures", "property_nodes", "invoke_nodes")
 _NODE_KINDS = ("pnode", "inode")
 # growable palette functions: their inputs are wired by position, element[i]
 # terminals the diagram shows under one name but Gen Script knows by another
-_SCRIPT_TERM_ALIASES = {("Index Array", "index"): "index (row)"}
+# terminals a script finds under no name (wired by terminal reference)
+_SCRIPT_TERM_NONE = {("Insert Into Array", "index"), ("Insert Into Array", "new element/subarray"),
+                     ("Replace Array Subset", "new element/subarray"),
+                     ("Delete From Array", "array w/ subset deleted")}
+_SCRIPT_TERM_ALIASES = {("Index Array", "index"): "index (row)", ("Replace Array Subset", "index"): "index (row)",
+                        ("Delete From Array", "index"): "index (row)"}
 _GROWABLE_FUNCS = {"Concatenate Strings", "Build Array", "Bundle", "Unbundle", "Build Cluster Array",
                    "Index Array", "Array Subset", "Replace Array Subset", "Insert Into Array",
                    "Delete From Array", "Array To Cluster", "Merge Errors", "Compound Arithmetic"}  # Property / Invoke Nodes: configured after they are placed
@@ -376,9 +385,12 @@ class Script:
     pnodes: list = None
     late: "Script | None" = None
     late_refs: list = None
+    # wires to terminals a script cannot name ("new element/subarray", "number: 0 to 1"), drawn last
+    # between terminal references: [(end, end)], end = ("out", k, terminal) | ("label", label, "")
+    ref_wires: list = None
 
     def has_nodes(self) -> bool:
-        return bool(self.pnodes) or any(fr["script"] is not None and fr["script"].has_nodes()
+        return bool(self.pnodes) or bool(self.ref_wires) or any(fr["script"] is not None and fr["script"].has_nodes()
                                         for ev in self.events or [] for fr in ev["frames"])
 
 
@@ -933,7 +945,7 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
         # A diagram holding only terminals is saved by LabVIEW as a file it cannot reopen.
         raise SpecError("the diagram needs at least one constant, function, subVI or structure")
 
-    wires, late_raw = [], []
+    wires, late_raw, ref_wires = [], [], []
     frame_wires: dict[str, list] = {}  # event frame id -> wires drawn in that frame, in spec syntax
     vc_frame: dict[str, str] = {}  # control -> its only Value Change frame
     for n in list(b.nodes.values()):
@@ -948,6 +960,9 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
             w = [w.get("from"), w.get("to")]
         if not (isinstance(w, (list, tuple)) and len(w) == 2 and all(isinstance(x, str) for x in w)):
             raise SpecError(f"wire {w!r} must be [\"from\", \"to\"]")
+        if any(_by_ref(b, e) for e in w):
+            ref_wires.append(tuple(_ref_end(b, e, labels, w, edit or bool(existing)) for e in w))
+            continue
         ends = (b.resolve(w[0]), b.resolve(w[1]))
         frames = {f for f in (b.event_frame(e.partition(".")[0]) for e in w) if f}
         if not frames and w[0] in vc_frame and b.encloses(w[1], vc_frame[w[0]]):
@@ -1008,8 +1023,40 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
         outs=sorted(b.out_index, key=b.out_index.get),
         events=[dict(e, out=b.out_index[e["name"]]) for e in
                 sorted(events, key=lambda e: b.event_order.index(e["name"]))],
-        pnodes=pnodes, late=late, late_refs=late_refs,
+        pnodes=pnodes, late=late, late_refs=late_refs, ref_wires=ref_wires,
     )
+
+
+def _by_ref(b: _Builder, end: str) -> bool:
+    node, _, term = end.partition(".")
+    n = b.nodes.get(node)
+    if n is None or n.kind not in ("function", "subvi"):
+        return False
+    fn = str(n.spec.get("function", "")).strip()
+    # a grown Index Array's index terminals have no name a script accepts
+    grown_index = fn == "Index Array" and n.spec.get("size") is not None and re.fullmatch(r"index(\[\d+\])?", term)
+    return bool(_TERM_BY_REF.search(term)) or (fn, term) in _SCRIPT_TERM_NONE or bool(grown_index)
+
+
+def _ref_end(b: _Builder, end: str, labels: dict, w, edit: bool):
+    """An end of a wire drawn between terminal references (see Script.ref_wires)."""
+    node, _, term = end.partition(".")
+    n = b.nodes.get(node)
+    if n is None:
+        raise SpecError(f"wire end {end!r}: no node named {node!r}")
+    if edit:
+        raise SpecError(f"wire {list(w)!r}: terminal {term!r} can only be wired by vi_create for now")
+    if b.event_frame(node):
+        raise SpecError(f"wire {list(w)!r}: terminals with names a script cannot use cannot be wired "
+                        "inside an event structure yet")
+    if n.kind in ("control", "indicator"):
+        return ("label", labels[node], "")
+    if n.kind in ("function", "subvi", "constant"):
+        if n.kind != "constant" and not term:
+            raise SpecError(f"wire end {end!r}: give the terminal, e.g. \"{node}.x\"")
+        return ("out", b.out_index.setdefault(node, len(b.out_index)), term)
+    raise SpecError(f"wire {list(w)!r}: a terminal whose name a script cannot use can be wired to a "
+                    f"function, subVI, constant, control or indicator, not to {node!r} (a {n.kind}) yet")
 
 
 _BYNAME = {"Unbundle By Name": "unbundle", "Bundle By Name": "bundle"}

@@ -235,14 +235,31 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
 
     # -- growable nodes: size from the highest element[k] wired
     sizes = collections.defaultdict(int)
+    grown_index = set()
     for a, b in wires:
         for e in (a, b):
             m = re.match(r"([^.]+)\.(?:element|value|string|error in)\[(\d+)\]$", e)
             if m:
                 sizes[m.group(1)] = max(sizes[m.group(1)], int(m.group(2)))
+            m = re.match(r"([^.]+)\.(?:element|index)\[(\d+)\]$", e)  # Index Array: size = groups + 2
+            if m and fn_of.get(m.group(1)) in ("Index Array", "ArrayIndexNode"):
+                grown_index.add(m.group(1))
+                sizes[m.group(1)] = max(sizes[m.group(1)], int(m.group(2)) + 2)
+                continue
             m = re.match(r"([^.]+)\.input (\d+)$", e)  # Format Into String: size = inputs + 3
             if m and fn_of.get(m.group(1)) == "Format Into String":
                 sizes[m.group(1)] = max(sizes[m.group(1)], int(m.group(2)) + 3)
+    # a grown Index Array: the dump's element[k] (k-th element output) is terminal 2k-1 of the node,
+    # which a script calls element[2k-1]; index[k] stays (vi_create wires it by terminal reference)
+    # Bundle: a script numbers its terminals output cluster 0, cluster 1, elements from 2
+    def ia_end(e):
+        m = re.match(r"([^.]+)\.element\[(\d+)\]$", e)
+        if m and m.group(1) in grown_index:
+            return f"{m.group(1)}.element[{2 * int(m.group(2)) - 1}]"
+        if m and fn_of.get(m.group(1)) == "Bundle":
+            return f"{m.group(1)}.element[{int(m.group(2)) + 1}]"
+        return e
+    wires = [[ia_end(a), ia_end(b)] for a, b in wires]
     for d in contents.values():
         for f in d.get("functions", []):
             if f["name"] in sizes:
@@ -344,8 +361,6 @@ def _map_end(e: str, nodes, sr_name, case_out, role: str) -> str:
     fn = FUNCTION_ALIASES.get(n.get("function"), n.get("function"))
     if n["kind"] == "function" and term == "element" and fn in gen._GROWABLE_FUNCS and fn != "Index Array":
         term = "element[1]"  # the scan reader numbers "element" only when there are several
-    if re.search(r":\s*\d", term):  # e.g. Random Number's "number: 0 to 1"
-        raise _Unsupported("terminal name with \":<number>\" (not wireable by script)")
     return f"{node}.{term}" if term else node
 
 
