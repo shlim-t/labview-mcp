@@ -62,6 +62,19 @@ except LabVIEWError as e:
 vals = call(lv.vi_run, base, {}, None, 10)["values"]
 check("still runs after revert", vals.get("out") == 4.0 and vals.get("y") == 6.0, vals)
 
+# a broken edit names LabVIEW's errors: an Add with one input left unwired
+try:
+    call(lv.vi_edit, base, {
+        "existing": {"o": "out"},
+        "functions": [{"name": "bad", "function": "Add"}],
+        "constants": [{"name": "k2", "type": "dbl", "value": 1}],
+        "wires": [["k2", "bad.x"]]}, False, False)
+    check("broken edit lists errors", False, "no error raised")
+except LabVIEWError as e:
+    check("broken edit lists errors", "reverted" in str(e) and "error list: Add" in str(e), str(e)[:200])
+vals = call(lv.vi_run, base, {}, None, 10)["values"]
+check("still runs after revert 2", vals.get("out") == 4.0 and vals.get("y") == 6.0, vals)
+
 # unknown label
 try:
     call(lv.vi_edit, base, {"existing": {"q": "Nope"}, "wires": []}, False, False)

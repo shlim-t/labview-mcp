@@ -62,10 +62,21 @@ async def lv_status() -> dict:
     return await _run(lv.status)
 
 
+def _error_lines(errors: list) -> str:
+    """LabVIEW's Error List as text lines: the error, then its explanation."""
+    lines = []
+    for e in errors:
+        lines.append(f"- {e['error']}" + (f" (x{e['count']})" if e.get("count") else ""))
+        if e.get("details"):
+            lines.append("    " + e["details"].replace("\n", " "))
+    return "\n".join(lines)
+
+
 @mcp.tool()
 async def vi_info(path: str) -> dict:
     """Metadata for one VI: type, description, LabVIEW version it was saved in, broken/idle state,
-    unsaved changes, subVIs it calls (callees) and callers loaded in memory.
+    unsaved changes, subVIs it calls (callees) and callers loaded in memory. A broken VI also gets
+    "errors": LabVIEW's Error List (why it is broken), each {"error", "details", "count"}.
 
     path: absolute path to a .vi/.vit/.ctl/.vim file."""
     return await _run(lv.vi_info, path)
@@ -290,6 +301,7 @@ async def vi_create(
         f"Connector pane (callers wire these labels): {res['connector_pane']}\n"
         + (f"Event frames: {res['event_frames']}\n" if res.get("event_frames") else "")
         + (f"WARNING: {res['warning']}\n" if res.get("warning") else "")
+        + (f"The VI is BROKEN. LabVIEW's error list:\n{_error_lines(res['errors'])}\n" if res.get("errors") else "")
         + "Check the pictures (the front panel, the diagram, and each event frame): a wire that "
         "LabVIEW could not connect is simply missing. Then call vi_run to test."
     ]
@@ -370,7 +382,9 @@ async def vi_edit(
     out: list[Any] = [
         f"Edited {res['path']} (state: {res['exec_state']}). Backup: {res['backup']}.\n"
         f"Removed: {res.get('removed', 0)} node(s). New front-panel objects: {res['added_front_panel']}\n"
-        "Check the picture, then vi_run to test."
+        + (f"The VI is BROKEN (allow_broken). LabVIEW's error list:\n{_error_lines(res['errors'])}\n"
+           if res.get("errors") else "")
+        + "Check the picture, then vi_run to test."
     ]
     for p in imgs[:1]:
         out.append(_image(p, 2000))

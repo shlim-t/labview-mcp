@@ -588,6 +588,7 @@ def measure(lv, g: dict, out: Path) -> dict:
         return res
     if r["exec_state"].startswith("bad"):
         res["stage"] = "broken"
+        res["errors"] = [e["error"] for e in r.get("errors", [])]
     try:
         g2 = lv.vi_dump(str(out), g["source"])
     except Exception as e:

@@ -178,6 +178,11 @@ def report(args):
         print("\nrebuild errors:")
         for e, c in errs.most_common(args.top):
             print(f"    {c:4}  {e}")
+    why = collections.Counter(e for r in rs if r.get("stage") == "broken" for e in set(r.get("errors", [])))
+    if why:
+        print("\nwhy rebuilt VIs are broken (LabVIEW's error list; VIs with each error):")
+        for e, c in why.most_common(args.top):
+            print(f"    {c:4}  {e}")
     feats = collections.Counter(f for r in rs for f in r.get("features", []))
     if feats:
         print("\nfeature use (VIs):", ", ".join(f"{k} {v}" for k, v in feats.most_common(40)))

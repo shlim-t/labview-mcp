@@ -483,9 +483,39 @@ def ui_case(name):
     return problems
 
 
-names = sys.argv[1:] or list(CASES) + list(UI_CASES)
+def broken_errors():
+    """A broken VI (Add with one input unwired): vi_create, vi_info and vi_run give LabVIEW's error list."""
+    p = os.path.join(D, "broken_errors.vi")
+    spec = {"controls": [{"name": "a", "type": "dbl"}], "indicators": [{"name": "s", "type": "dbl"}],
+            "functions": [{"name": "add", "function": "Add"}], "wires": [["a", "add.x"], ["add.x+y", "s"]]}
+    res = lv.call(lv.vi_create, p, spec, True, "").result()
+    problems = []
+    if not res["exec_state"].startswith("bad") or not any("Add" in e["error"] for e in res.get("errors", [])):
+        problems.append(f"vi_create: {res['exec_state']} {res.get('errors')}")
+    info = lv.call(lv.vi_info, p).result()
+    if not info.get("errors") or not all(e.get("details") for e in info["errors"]):
+        problems.append(f"vi_info: {info.get('errors')}")
+    try:
+        lv.call(lv.vi_run, p, {}, None, 5).result()
+        problems.append("vi_run ran a broken VI")
+    except Exception as e:
+        if "error list: Add" not in str(e):
+            problems.append(f"vi_run: {str(e)[:200]}")
+    return problems
+
+
+CHECKS = {"broken_errors": broken_errors}
+names = sys.argv[1:] or list(CASES) + list(UI_CASES) + list(CHECKS)
 failed = 0
 for name in names:
+    if name in CHECKS:
+        try:
+            problems = CHECKS[name]()
+        except Exception as e:
+            problems = [f"error: {str(e)[:300]}"]
+        failed += bool(problems)
+        print(f"{'FAIL' if problems else 'PASS'} {name}: {problems or 'as expected'}")
+        continue
     if name in UI_CASES:
         try:
             problems = ui_case(name)

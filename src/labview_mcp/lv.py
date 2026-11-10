@@ -182,7 +182,38 @@ class LabVIEW:
             },
             "callees": callees,
             "callers_in_memory": list(vi.Callers or ()),
-        })
+        }) | ({"errors": self.vi_errors(vi)} if vi.ExecState == 0 else {})
+
+    def vi_errors(self, vi) -> list[dict]:
+        """Why a VI is broken: LabVIEW's Error List entries (VI.Get Errors), the same ones repeated
+        counted once: [{"error": short text, "details": LabVIEW's explanation, "count": n}]."""
+        h = _try(lambda: self._helper(GETERRORS_VI))
+        if h is None:
+            return []
+        h.SetControlValue("reference", vi)
+        h.Run(False)
+        if h.GetControlValue("error out")[0]:
+            return []
+        errs = list(h.GetControlValue("Errors") or ())
+        dets = list(h.GetControlValue("Details") or ())
+        out: dict[tuple, dict] = {}
+        for i, e in enumerate(errs):
+            d = re.sub(r"\r\n?|\n", "\n", str(dets[i] if i < len(dets) else "")).strip()
+            k = (str(e).strip(), d)
+            if k in out:
+                out[k]["count"] += 1
+            else:
+                out[k] = {"error": k[0], "details": d, "count": 1}
+        return [x if x["count"] > 1 else {k: v for k, v in x.items() if k != "count"} for x in out.values()]
+
+    def _errors_text(self, vi, limit: int = 8) -> str:
+        """The Error List in one line, for error messages."""
+        errs = _try(lambda: self.vi_errors(vi)) or []
+        if not errs:
+            return ""
+        parts = [e["error"] + (f" (x{e['count']})" if e.get("count") else "") for e in errs[:limit]]
+        more = f"; and {len(errs) - limit} more" if len(errs) > limit else ""
+        return " LabVIEW's error list: " + "; ".join(parts) + more + "."
 
     def _export_strings(self, vi, diagram: bool) -> str:
         f = self._scratch("strings") / "strings.txt"
@@ -317,7 +348,9 @@ class LabVIEW:
                timeout_s: float, actions: list | None = None) -> dict:
         vi = self._vi(path)
         if vi.ExecState == 0:
-            raise LabVIEWError("VI is broken (has errors) and cannot run. Open it in LabVIEW to see the error list.")
+            raise LabVIEWError("VI is broken (has errors) and cannot run." + (
+                self._errors_text(vi) or " Open it in LabVIEW to see the error list.")
+                + " vi_info gives each error with LabVIEW's details.")
         if vi.ExecState in (2, 3):
             raise LabVIEWError("VI is already running.")
         enums = self._enum_items(path)  # label -> item names; enums go through COM as numbers
@@ -482,6 +515,7 @@ class LabVIEW:
         res = {
             "path": str(p),
             "exec_state": EXEC_STATES.get(target.ExecState, target.ExecState),
+            **({"errors": self.vi_errors(target)} if target.ExecState == 0 else {}),
             "front_panel": script.labels,
             "connector_pane": script.connector,
             "script_xml": script.xml,
@@ -1747,6 +1781,7 @@ class LabVIEW:
             raise LabVIEWError(f"{e} The VI was reverted and not saved.") from None
         after = self._sink_count(path)  # compiles the diagram, which also refreshes ExecState
         broken = self._still_broken(target)
+        errors = []
         n_wires = len(script.wires) + sum(len(fs[3].wires) for fs in frame_scripts) - cut_sinks
         if not broken and before is not None and after is not None and after - before < n_wires:
             # LabVIEW drops a wire it cannot make (e.g. a second source into a wired indicator)
@@ -1770,15 +1805,19 @@ class LabVIEW:
             target._FlagAsMethod("SaveInstrument")
             target._FlagAsMethod("Revert")
             broken = self._still_broken(target, 1.0)
+            errors = self.vi_errors(target) if broken else []
             if broken and not allow_broken:
                 shutil.copy2(pristine, path)
                 _try(lambda: target.Revert())
         if broken and not allow_broken:
             _try(lambda: target.Revert())
+            listed = "; ".join(e["error"] + (f" (x{e['count']})" if e.get("count") else "") for e in errors[:8])
             raise LabVIEWError(
                 "The edit made the VI broken (for example two sources wired to one indicator, an unwired "
-                "required input, or mismatched types), so it was reverted and not saved. Fix the spec, or "
-                "pass allow_broken=true to save it anyway and inspect it with vi_snapshot.")
+                "required input, or mismatched types), so it was reverted and not saved."
+                + (f" LabVIEW's error list: {listed}." if listed else "")
+                + " Fix the spec, or pass allow_broken=true to save it anyway and inspect it with vi_info "
+                "(each error with LabVIEW's details) and vi_snapshot.")
         for label, value in script.defaults.items():
             target.SetControlValue(label, value)
         if script.defaults:
@@ -1787,6 +1826,7 @@ class LabVIEW:
         target.SaveInstrument(path, False, False)
         return {"path": path, "backup": str(bak) if bak else None,
                 "exec_state": EXEC_STATES.get(target.ExecState, target.ExecState),
+                **({"errors": errors} if broken else {}),
                 "removed": removed, "added_front_panel": script.labels,
                 **({"disconnected": len(cut_wires)} if cut_wires else {}), **changed}
 
@@ -2530,6 +2570,7 @@ BLANK_VI = VIS_DIR / "lvmcp_blank.vi"
 DFIR_VI = VIS_DIR / "lvmcp_dfir.vi"
 RAW_GEN_VI = VIS_DIR / "lvmcp_gen_script_raw.vi"
 UIDS_VI = VIS_DIR / "lvmcp_uids.vi"
+GETERRORS_VI = VIS_DIR / "lvmcp_geterrors.vi"
 DELETE_VI = VIS_DIR / "lvmcp_delete.vi"
 DIAG_GEN_VI = VIS_DIR / "lvmcp_gen_script_diag.vi"
 REPLACE_VI = VIS_DIR / "lvmcp_replace.vi"

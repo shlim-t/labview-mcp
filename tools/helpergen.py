@@ -172,7 +172,9 @@ def build_helper(lv: LabVIEW, path: Path, spec: dict) -> dict:
     for node, term in spec.get("term_indicators", []):
         uid = lv._uid_of(refs[[n["name"] for n in nodes].index(node)])
         by_uid = dict(lv._owned(t, "Terminal", uid))
-        tref = next((by_uid[u] for u, nm in lv._owned(t, "Terminal", uid, names=True) if nm == term), None)
+        # a method parameter both in and out has two terminals of one name: the output is the later one
+        tref = next((by_uid[u] for u, nm in sorted(lv._owned(t, "Terminal", uid, names=True), reverse=True)
+                     if nm == term), None)
         if tref is None:
             raise LabVIEWError(f"{node} has no terminal {term!r}")
         before = set(lv._fp_refs_by_label(t))
@@ -613,6 +615,15 @@ HELPERS["lvmcp_staticvi"] = {
                "write": True}],
     "wires": [("reference", "p.reference"), ("path", "p.Path"), ("strict", "p.IsStrict"),
               ("p.error out", "error out")],
+}
+
+# VI.Get Errors: why a VI is broken (the Error List window's entries), for vi_create / vi_edit / vi_info
+HELPERS["lvmcp_geterrors"] = {
+    "controls": [("reference", "ref:VI")],
+    "indicators": [("error out", "error")],
+    "nodes": [{"name": "k", "kind": "invoke", "class": "VI", "method": "Get Errors"}],
+    "wires": [("reference", "k.reference"), ("k.error out", "error out")],
+    "term_indicators": [("k", "Errors"), ("k", "Details")],
 }
 
 ORDER = ["lvmcp_move", "lvmcp_propwrite", "lvmcp_proplink", "lvmcp_invokelink", "lvmcp_uid", "lvmcp_classname",
