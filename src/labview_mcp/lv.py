@@ -431,6 +431,8 @@ class LabVIEW:
                                                                 refs=refs, raw=True))
             if script.replaces:
                 self._replace_functions(target, script.replaces, out_refs)
+            if script.static_refs:
+                self._point_static_refs(target, script.static_refs, out_refs)
             srs = self._stack_shift_registers(target, script.stacks, out_refs) if script.stacks else {}
             if script.ref_wires:
                 self._connect_by_ref(target, script.ref_wires, out_refs, srs)
@@ -688,6 +690,23 @@ class LabVIEW:
                     cnt.SetControlValue("count", int(size))
                     self._run_checked(cnt, f"growing {fn!r} to {size} inputs")
 
+
+    def _point_static_refs(self, target, static_refs: list, outs: list) -> None:
+        """Point placed Static VI References at their VI (VI Path, then Is Strict)."""
+        if not any(p for _, p, _ in static_refs):
+            return
+        svr, all_refs = self._helper(STATICVI_VI), self._all_of(target, "StaticVIReference")
+        for k, path, strict in static_refs:
+            if not path:
+                continue
+            ref = all_refs.get(self._uid_of(outs[k]))
+            if ref is None:
+                raise LabVIEWError("a Static VI Reference was not found on the diagram")
+            svr.SetControlValue("reference", ref)
+            svr.SetControlValue("path", path)
+            svr.SetControlValue("strict", bool(strict))
+            self._run_checked(svr, f"pointing a Static VI Reference at {path}")
+
     def _owners(self, target) -> dict:
         """{uid: owner uid} of every block-diagram object."""
         h = self._helper(UIDS_VI)
@@ -844,6 +863,8 @@ class LabVIEW:
                 if not hits and m:  # "index[2]": the 2nd terminal named "index", in node order
                     same = [r for n, r in own if n == m.group(1)]
                     hits = same[int(m.group(2)) - 1:int(m.group(2))] if int(m.group(2)) >= 1 else []
+                if not hits and len(own) == 1 and not own[0][0]:
+                    hits = [own[0][1]]  # a node's only, unnamed terminal (Static VI Reference)
                 what = f"terminal {name!r}" + (f" (the node has {[n for n, _ in own]})" if own else "")
             if len(hits) != 1:
                 raise LabVIEWError(f"wiring by terminal reference: cannot find {what}")
@@ -2120,6 +2141,7 @@ class LabVIEW:
                 _try(lambda: self._real_terminal_names(g))
                 _try(lambda: self._dfir_flat_types(str(path), g))  # first: it fills in missing labels
                 _try(lambda: self._control_classes(self._vi(str(path)), g))
+                _try(lambda: self._static_vi_targets(self._vi(str(path)), g))
                 return {"vi": str(path), "source": "dfir", **g}
             except LabVIEWError as e:
                 if method == "dfir" or "password-protected" in str(e):
@@ -2299,6 +2321,7 @@ class LabVIEW:
                 for fr, cap in zip(n.get("frames", []), caps):
                     fr["events"] = parse_event_caption(cap)
         _try(lambda: self._scan_types(target, g, dict(zip((r.uid for r in rows), cols[6]))))
+        _try(lambda: self._static_vi_targets(target, g))
         _try(lambda: self._control_classes(target, g))
         return g
 
@@ -2326,6 +2349,24 @@ class LabVIEW:
                 if not h.GetControlValue("error out")[0]:
                     out[r.uid] = [int(self._uid_of(d)) for d in h.GetControlValue("Diagrams[]") or ()]
         return out
+
+    def _static_vi_targets(self, target, g: dict) -> None:
+        """The VI each Static VI Reference points at ("path") and whether it is strictly typed."""
+        nodes = [n for n in g["nodes"] if n.get("function") == "Static VI Reference" and "uid" in n]
+        if not nodes:
+            return
+        refs, h = self._all_of(target, "StaticVIReference"), self._helper(STATICVIINFO_VI)
+        for n in nodes:
+            if n["uid"] not in refs:
+                continue
+            h.SetControlValue("reference", refs[n["uid"]])
+            h.Run(False)
+            if h.GetControlValue("error out")[0]:
+                continue
+            p = str(h.GetControlValue("path") or "")
+            if p:
+                n["path"] = p
+                n["strict"] = bool(h.GetControlValue("strict"))
 
     def _shift_register_sides(self, rows, refs) -> dict:
         """{left shift register UID: (right side UID, top)} for vi_dump's scan reader."""
@@ -2516,6 +2557,8 @@ FRAMEDIAGS_VI = VIS_DIR / "lvmcp_framediags.vi"
 CASESELECTOR_VI = VIS_DIR / "lvmcp_caseselector.vi"
 USEDEFAULT_VI = VIS_DIR / "lvmcp_usedefault.vi"
 INPUTCNT_VI = VIS_DIR / "lvmcp_inputcnt.vi"
+STATICVI_VI = VIS_DIR / "lvmcp_staticvi.vi"
+STATICVIINFO_VI = VIS_DIR / "lvmcp_staticviinfo.vi"
 
 
 def _spec_functions(spec: dict) -> set:

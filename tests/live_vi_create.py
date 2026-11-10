@@ -11,6 +11,9 @@ D = tempfile.mkdtemp(prefix="lvmcp-test-")
 
 # timestamp type string, as vi_dump gives it in "flat"
 TS = "001c0054000600160050000400040003000400030004000300040003"
+# a VI that ships with the package (target of the Static VI Reference case)
+import labview_mcp
+UID_VI = os.path.join(os.path.dirname(labview_mcp.__file__), "vis", "lvmcp_uid.vi")
 CASES = {
     # i*k for i in 0..n-1 -> auto-indexed array
     "for_scale": ({
@@ -300,6 +303,21 @@ CASES = {
         "wires": [["e1", "m.error in[1]"], ["e2", "m.error in[2]"], ["e3", "m.error in[3]"], ["e4", "m.error in[4]"],
                   ["m.error out", "eo"], ["f.First Call?: T/F", "fc"]],
     }, {}, {"merged": [True, 42, "boom"], "first": True}),
+    # Static VI Reference pointed at a VI (strictly typed), its reference wired out of a loop into a
+    # Property Node; a second, plain one beside it
+    "static_vi_ref": ({
+        "indicators": [{"name": "n", "type": "string", "label": "name"},
+                       {"name": "n2", "type": "string", "label": "name 2"}],
+        "structures": [{"name": "L", "type": "while_loop",
+                        "constants": [{"name": "t", "type": "bool", "value": True}],
+                        "functions": [{"name": "r", "function": "Static VI Reference", "vi": UID_VI,
+                                       "strict": True}]}],
+        "functions": [{"name": "r2", "function": "Static VI Reference", "vi": UID_VI}],
+        "property_nodes": [{"name": "p", "class": "VI", "properties": ["Name"]},
+                           {"name": "p2", "class": "VI", "properties": ["Name"]}],
+        "wires": [["t", "L.stop"], ["r.vi reference", "p.reference"], ["p.Name", "n"],
+                  ["r2.vi reference", "p2.reference"], ["p2.Name", "n2"]],
+    }, {}, {"name": "lvmcp_uid.vi", "name 2": "lvmcp_uid.vi"}),
     # Unbundle By Name / Bundle By Name: elements chosen by name, in any order
     "by_name": ({
         "controls": [{"name": "c", "type": {"cluster": [{"name": "alpha", "type": "dbl"},

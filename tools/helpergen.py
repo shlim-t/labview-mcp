@@ -349,7 +349,7 @@ HELPERS["lvmcp_termctl"] = {
 }
 # Terminal.Connect Wire: a wire between two terminals given by reference (terminals whose names a
 # script cannot use: "new element/subarray", "number: 0 to 1", unnamed ones)
-HELPERS["lvmcp_connect", "lvmcp_srright", "lvmcp_sradd", "lvmcp_termdiag", "lvmcp_framediags", "lvmcp_caseselector", "lvmcp_usedefault", "lvmcp_inputcnt"] = {
+HELPERS["lvmcp_connect"] = {
     "controls": [("reference", "ref:Terminal"), ("other", "ref:Terminal")],
     "indicators": [("error out", "error")],
     "nodes": [{"name": "k", "kind": "invoke", "class": "Terminal", "method": "Connect Wire"}],
@@ -594,6 +594,25 @@ HELPERS["lvmcp_inputcnt"] = {
     "indicators": [("error out", "error")],
     "nodes": [{"name": "p", "kind": "property", "class": "Bundler", "items": ["InputCnt"], "write": True}],
     "wires": [("reference", "p.reference"), ("count", "p.InputCnt"), ("p.error out", "error out")],
+}
+
+# StaticVIReference.VI Path / Is Strict (read): the VI a Static VI Reference points at (vi_dump)
+HELPERS["lvmcp_staticviinfo"] = {
+    "controls": [("reference", "ref:StaticVIReference")],
+    "indicators": [("path", "path"), ("strict", "bool"), ("error out", "error")],
+    "nodes": [{"name": "p", "kind": "property", "class": "StaticVIReference", "items": ["Path", "IsStrict"]}],
+    "wires": [("reference", "p.reference"), ("p.Path", "path"), ("p.IsStrict", "strict"),
+              ("p.error out", "error out")],
+}
+
+# StaticVIReference.VI Path, then Is Strict (write): point a placed Static VI Reference at a VI (vi_create)
+HELPERS["lvmcp_staticvi"] = {
+    "controls": [("reference", "ref:StaticVIReference"), ("path", "path"), ("strict", "bool")],
+    "indicators": [("error out", "error")],
+    "nodes": [{"name": "p", "kind": "property", "class": "StaticVIReference", "items": ["Path", "IsStrict"],
+               "write": True}],
+    "wires": [("reference", "p.reference"), ("path", "p.Path"), ("strict", "p.IsStrict"),
+              ("p.error out", "error out")],
 }
 
 ORDER = ["lvmcp_move", "lvmcp_propwrite", "lvmcp_proplink", "lvmcp_invokelink", "lvmcp_uid", "lvmcp_classname",

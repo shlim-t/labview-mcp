@@ -134,7 +134,13 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
                 if catalog is not None and fn not in catalog:
                     raise _Unsupported(f"function: {fn}")
                 features.add("function")
-                contents[where]["functions"].append({"name": nid, "function": fn})
+                f = {"name": nid, "function": fn}
+                if fn == "Static VI Reference" and n.get("path"):
+                    features.add("static VI reference")
+                    f["vi"] = n["path"]
+                    if n.get("strict"):
+                        f["strict"] = True
+                contents[where]["functions"].append(f)
             elif k == "subvi":
                 if not n.get("path"):
                     raise _Unsupported("subVI: path unknown")
@@ -537,6 +543,8 @@ def signature(g: dict) -> dict:
             continue
         if k == "function":
             k = f"function:{FUNCTION_ALIASES.get(n.get('function'), n.get('function'))}"
+            if n.get("path"):  # Static VI Reference: the VI it points at
+                k += f":{Path(n['path']).name}{' (strict)' if n.get('strict') else ''}"
         elif k == "subvi":
             k = f"subvi:{Path(n.get('path', '')).name}"
         elif k == "constant":

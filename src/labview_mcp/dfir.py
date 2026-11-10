@@ -207,6 +207,7 @@ _PART = {"LoopIndex": "i", "LoopMax": "N", "LoopCondition": "stop", "CaseSelecto
 
 # Nodes whose DFIR class is not "<Palette Name>Primitive".
 _NODE_NAMES = {"ConcatenateNode": "Concatenate Strings", "BuildArrayNode": "Build Array",
+               "StaticVI": "Static VI Reference",
                "UnbundleNode": "Unbundle", "BundleNode": "Bundle", "PrintfNode": "Format Into String",
                "UnbundleByNameNode": "Unbundle By Name", "BundleByNameNode": "Bundle By Name",
                "IndexArrayNode": "Index Array", "ScanfNode": "Scan From String",
@@ -485,6 +486,8 @@ def parse(text: str, catalog: dict[str, list[str]] | None = None, subvi_terms=No
         cls = n.get("class")
         if cls in _INDEXED_TERMS and t < len(_INDEXED_TERMS[cls]) and n.get("_nterms", 0) <= len(_INDEXED_TERMS[cls]):
             return f"{n['id']}.{_INDEXED_TERMS[n['class']][t]}"
+        if n.get("class") == "StaticVI":  # its one (unnamed) terminal
+            return f"{n['id']}.vi reference"
         if n.get("class") == "MergeErrorsNode":  # error out, then error in 1..n
             return f"{n['id']}." + ("error out" if t == 0 else f"error in[{t}]")
         if n.get("class") == "PrintfNode":

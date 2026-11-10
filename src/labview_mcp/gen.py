@@ -341,6 +341,29 @@ NODE_HELP = (
     "\"Value\", \"App.Version\"); nested ones as LabVIEW shows them (\"Label.Text\", \"Plot.Plot Color\").")
 
 
+STATIC_VI_REF = "Static VI Reference"
+
+
+def _static_vi_path(f: dict) -> str | None:
+    """The VI a Static VI Reference points at ("vi": absolute path; none = an empty reference)."""
+    path, strict = f.get("vi"), f.get("strict", False)
+    if not isinstance(strict, bool):
+        raise SpecError(f"function {f.get('name')!r}: \"strict\" is true or false")
+    if path is None:
+        if strict:
+            raise SpecError(f"function {f.get('name')!r}: a strictly typed reference needs \"vi\"")
+        return None
+    if not isinstance(path, str) or not path.lower().endswith((".vi", ".vim", ".vit", ".ctl")):
+        raise SpecError(f"function {f.get('name')!r}: \"vi\" is an absolute path to a .vi")
+    pp = Path(path)
+    if not pp.is_absolute():
+        raise SpecError(f"function {f.get('name')!r}: \"vi\" must be absolute: {path}")
+    llb = next((q for q in pp.parents if q.suffix.lower() == ".llb"), None)
+    if not (pp.is_file() or (llb is not None and llb.is_file())):
+        raise SpecError(f"function {f.get('name')!r}: file not found: {path}")
+    return str(pp)
+
+
 def _check_node(pn: dict, kind: str, b) -> None:
     name = pn.get("name")
     extra = set(pn) - {"name", "control", "class", "properties", "write", "method"}
@@ -398,10 +421,13 @@ class Script:
     # functions a script cannot place by name: placed as a stand-in, then replaced by the palette
     # object of that name (GObject.Replace): [(k, function, size)], k = index into outs
     replaces: list = None
+    # Static VI References: [(k, vi path or None, strict)]; pointed at their VI before anything is wired
+    # (wires to them are drawn between terminal references: a script cannot name their terminal)
+    static_refs: list = None
 
     def has_nodes(self) -> bool:
         return bool(self.pnodes) or bool(self.ref_wires) or bool(self.stacks) or bool(self.use_default) \
-            or bool(self.replaces) or any(fr["script"] is not None and fr["script"].has_nodes()
+            or bool(self.replaces) or bool(self.static_refs) or any(fr["script"] is not None and fr["script"].has_nodes()
                                         for ev in self.events or [] for fr in ev["frames"])
 
 
@@ -486,6 +512,11 @@ class _Builder:
             size = f.get("size", f.get("inputs"))
             if size is not None and not (isinstance(size, int) and not isinstance(size, bool) and 1 <= size <= 100):
                 raise SpecError(f"function {f.get('name')!r}: \"size\" must be an integer 1..100")
+            if fn.strip() == STATIC_VI_REF:
+                f["_vi"] = _static_vi_path(f)
+            elif "vi" in f or "strict" in f:
+                raise SpecError(f"function {f.get('name')!r}: \"vi\" and \"strict\" belong to a "
+                                f"\"{STATIC_VI_REF}\" only")
         for s in d.get("subvis", []) or []:
             self.add(s.get("name"), "subvi", container, s)
             path = s.get("path")
@@ -992,6 +1023,14 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
                                 "scripting by name; vi_create places it outside event structures only")
             replaces.append((b.out_index.setdefault(nm, len(b.out_index)), n.spec["function"].strip(),
                              n.spec.get("size")))
+    static_refs = []
+    for nm, n in b.nodes.items():
+        if n.kind == "function" and n.bind is None and str(n.spec.get("function", "")).strip() == STATIC_VI_REF:
+            if edit or existing or b.event_frame(nm):
+                raise SpecError(f"function {nm!r}: a {STATIC_VI_REF} is placed by vi_create, outside event "
+                                "structures, only")
+            static_refs.append((b.out_index.setdefault(nm, len(b.out_index)), n.spec.get("_vi"),
+                                bool(n.spec.get("strict", False))))
     for nm in refs:  # objects whose references the caller wants back (in Script.outs order)
         b.out_index.setdefault(nm, len(b.out_index))
     if not edit and not existing and not any(n.kind not in ("control", "indicator") for n in b.nodes.values()):
@@ -1098,6 +1137,7 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
         pnodes=pnodes, late=late, late_refs=late_refs, ref_wires=ref_wires,
         stacks=sorted((b.out_index[n], k) for n, k in b.sr_stack.items()),
         replaces=replaces,
+        static_refs=static_refs,
         use_default=use_default,
     )
 
@@ -1114,6 +1154,8 @@ def _by_ref(b: _Builder, end: str) -> bool:
     if n is None or n.kind not in ("function", "subvi"):
         return False
     if n.kind == "function" and str(n.spec.get("function", "")).strip() in getattr(b, "replace", ()):
+        return True
+    if n.kind == "function" and str(n.spec.get("function", "")).strip() == STATIC_VI_REF:
         return True  # replaced after the script ran: wired between terminal references
     fn = str(n.spec.get("function", "")).strip()
     # a grown Index Array's index terminals have no name a script accepts

@@ -121,7 +121,10 @@ def build(rows: list[Row], labels: dict[int, str], shift_registers: dict | None 
             n["kind"] = "constant"
             if r.value is not None:
                 n["value"] = r.value
-        elif "SubVI" in r.cls or r.cls in ("StaticVIReference", "CallParentNode", "CallByReference"):
+        elif r.cls == "StaticVIReference":  # vi_dump adds the VI it points at ("path", "strict")
+            n["kind"] = "function"
+            n["function"] = "Static VI Reference"
+        elif "SubVI" in r.cls or r.cls in ("CallParentNode", "CallByReference"):
             n["kind"] = "subvi"
             n["vi"] = labels.get(r.uid, "")
         elif r.cls in ("Property", "Invoke"):
@@ -227,6 +230,8 @@ def build(rows: list[Row], labels: dict[int, str], shift_registers: dict | None 
             nid = node_id[o]
             if by_uid.get(o) and by_uid[o].cls.endswith("Constant"):
                 return nid
+            if not t.name and by_uid.get(o) and by_uid[o].cls == "StaticVIReference":
+                return f"{nid}.vi reference"
             if not t.name:
                 return f"{nid}[uid {t.uid}]"
             name = elem.get(t.uid, t.name)
