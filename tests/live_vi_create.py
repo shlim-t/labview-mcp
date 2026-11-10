@@ -9,6 +9,8 @@ from labview_mcp.lv import LabVIEW
 lv = LabVIEW()
 D = tempfile.mkdtemp(prefix="lvmcp-test-")
 
+# timestamp type string, as vi_dump gives it in "flat"
+TS = "001c0054000600160050000400040003000400030004000300040003"
 CASES = {
     # i*k for i in 0..n-1 -> auto-indexed array
     "for_scale": ({
@@ -252,6 +254,16 @@ CASES = {
         "wires": [["c", "p.reference"], ["p.Visible", "v"], ["k", "n.number/path/refnum"],
                   ["n.NaN/Path/Refnum?", "nan"], ["p.error out", "e"]],
     }, {}, {"v": False, "nan": True}),
+    # a type copied as a flattened type string ("flat"): a timestamp (0x54, kind 6) constant of 100 s
+    # and a timestamp indicator, converted to a number
+    "flat_type": ({
+        "indicators": [{"name": "o", "type": "dbl", "label": "seconds"},
+                       {"name": "ts", "type": {"flat": TS, "data": "00" * 16}, "label": "stamp"}],
+        "constants": [{"name": "k", "type": {"flat": TS,
+                                             "data": (100).to_bytes(8, "big").hex() + "00" * 8}}],
+        "functions": [{"name": "f", "function": "To Double Precision Float"}],
+        "wires": [["k", "f.number"], ["f.double precision float", "o"], ["k", "ts"]],
+    }, {}, {"seconds": 100.0}),
     # an unwired error (Not a Refnum into a Property Node) must not open LabVIEW's automatic error
     # dialog, which would block LabVIEW and hang this run
     "no_error_dialog": ({

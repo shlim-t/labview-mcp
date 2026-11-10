@@ -302,11 +302,13 @@ HELPERS["lvmcp_outcnt"] = {
 def _typeof_helper(cls: str) -> dict:
     return {
         "controls": [("reference", f"ref:{cls}")],
-        "indicators": [("type string", "i16[]"), ("data string", "string"), ("error out", "error")],
+        "indicators": [("type string", "i16[]"), ("data bytes", "u8[]"), ("error out", "error")],
         "nodes": [{"name": "p", "kind": "property", "class": cls, "items": ["Value"]},
-                  {"name": "v", "kind": "function", "function": "Variant To Flattened String"}],
+                  {"name": "v", "kind": "function", "function": "Variant To Flattened String"},
+                  {"name": "b", "kind": "function", "function": "String To Byte Array"}],
         "wires": [("reference", "p.reference"), ("p.Value", "v.Variant"), ("v.type string", "type string"),
-                  ("v.data string", "data string"), ("p.error out", "error out")],
+                  ("v.data string", "b.string"), ("b.unsigned byte array", "data bytes"),
+                  ("p.error out", "error out")],
     }
 
 

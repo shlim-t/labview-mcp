@@ -49,7 +49,8 @@ TYPE_HELP = ("Types: dbl, sgl, i8, i16, i32, i64, u8, u16, u32, u64, bool, strin
              "enums as {\"enum\": [\"Init\", \"Run\", \"Stop\"]} (values are item names); "
              "VI Server references as \"ref:Control\", \"ref:VI\", \"ref:Boolean[]\"; "
              "arrays by suffix (\"dbl[]\", \"string[][]\"); clusters as "
-             "{\"cluster\": [{\"name\": \"a\", \"type\": \"dbl\"}, ...]}.")
+             "{\"cluster\": [{\"name\": \"a\", \"type\": \"dbl\"}, ...]}; any other type (waveform, "
+             "class, typedef, ...) as the \"flat\" entry vi_dump gives a control or constant.")
 
 
 @dataclass
@@ -62,6 +63,8 @@ class LVType:
 
     # -- flattened type descriptor
     def td(self, name: str | None = None) -> bytes:
+        if self.kind == "flat":
+            return self.items[0]
         if self.kind in _NUM:
             code, body = _NUM[self.kind][0], b""
         elif self.kind == "bool":
@@ -101,6 +104,10 @@ class LVType:
     # -- flattened data
     def data(self, v: Any = None) -> bytes:
         k = self.kind
+        if k == "flat":
+            if v is not None:
+                raise SpecError("a {\"flat\": ...} type keeps the default value it was copied with")
+            return self.items[1]
         if k in _NUM:
             fmt = ">" + _NUM[k][1]
             if v is None:
@@ -198,6 +205,15 @@ def _flatten_path(v) -> bytes:
 
 
 def parse_type(t: Any) -> LVType:
+    if isinstance(t, dict) and "flat" in t:  # a type copied from an existing object (vi_dump)
+        try:
+            ts, ds = bytes.fromhex(t["flat"]), bytes.fromhex(t.get("data") or "")
+        except (TypeError, ValueError):
+            raise SpecError("{\"flat\": ...} takes the hex type string vi_dump gives, and \"data\": "
+                            "its hex default value") from None
+        if len(ts) < 4 or struct.unpack_from(">H", ts, 0)[0] != len(ts):
+            raise SpecError("{\"flat\": ...}: not a flattened LabVIEW type string")
+        return LVType("flat", items=[ts, ds])
     if isinstance(t, dict) and "enum" in t:
         items = t["enum"]
         if (not isinstance(items, list) or not items or len(items) > 1000

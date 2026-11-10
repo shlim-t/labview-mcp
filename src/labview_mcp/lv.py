@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import tempfile
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -381,6 +382,9 @@ class LabVIEW:
         from . import gen
 
         script = gen.build(spec)  # validates before LabVIEW is touched
+        # copied class types ({"flat": ..., "from": VI}) need their classes in memory: keep the VIs
+        # they were copied from open while building
+        keep = [_try(lambda: self._vi(f)) for f in sorted(_flat_sources(spec)) if Path(f).is_file()]  # noqa: F841
         p = Path(path).expanduser()
         if not p.is_absolute() or p.suffix.lower() != ".vi":
             raise LabVIEWError(f"path must be an absolute path ending in .vi: {path}")
@@ -1814,6 +1818,7 @@ class LabVIEW:
                 if any(n["kind"] == "constant" and "[]" in json.dumps(n.get("type", "")) for n in g["nodes"]):
                     self._fill_array_constants(path, g)
                 _try(lambda: self._real_terminal_names(g))
+                _try(lambda: self._dfir_flat_types(str(path), g))  # first: it fills in missing labels
                 _try(lambda: self._control_classes(self._vi(str(path)), g))
                 return {"vi": str(path), "source": "dfir", **g}
             except LabVIEWError as e:
@@ -1899,6 +1904,42 @@ class LabVIEW:
                 below = [u for u in by_uid if u <= n["uid"]]
                 if below:
                     n["value"] = _jsonable(by_uid[max(below)])
+
+    def _top_controls(self, target) -> list:
+        """(label, refnum) of the top-level front-panel controls and indicators."""
+        h = self._helper(UIDS_VI)
+        h.SetControlValue("VI Refnum", target)
+        h.SetControlValue("Traverse Target", 0)  # front panel
+        h.SetControlValue("Class Name", "Control")
+        h.Run(False)
+        uids = list(h.GetControlValue("UIDs") or ())
+        lab = self._vi(str(Path(self.app.ApplicationDirectory) / _VILIB_TREF / "Get GObject Label.vi"))
+        out = []
+        for o, r in zip(h.GetControlValue("Owner UIDs") or (), h.GetControlValue("References") or ()):
+            if o in uids:
+                continue  # an element of a cluster or array
+            lab.SetControlValue("GObject", r)
+            lab.Run(False)
+            out.append((lab.GetControlValue("Object Label") or "", r))
+        return out
+
+    def _dfir_flat_types(self, path: str, g: dict) -> None:
+        """_flat_types for a DFIR dump. DFIR names a constant by its data object's UID, a few above
+        the constant's own UID."""
+        target = self._vi(path)
+        h = self._helper(UIDS_VI)
+        h.SetControlValue("VI Refnum", target)
+        h.SetControlValue("Class Name", "Constant")
+        h.SetControlValue("Traverse Target", 1)
+        h.Run(False)
+        uids = list(h.GetControlValue("UIDs") or ())
+        owners = list(h.GetControlValue("Owner UIDs") or ())
+        ref_of = {u: r for u, o, r in zip(uids, owners, h.GetControlValue("References") or ()) if o not in uids}
+
+        def const_ref(n):
+            below = [u for u in ref_of if "uid" in n and u <= n["uid"]]
+            return ref_of[max(below)] if below else None
+        self._flat_types(target, g, const_ref)
 
     def _scan(self, path: str) -> dict:
         from . import scan
@@ -1992,14 +2033,50 @@ class LabVIEW:
                             fr["name"] = nm
                             if "Default" in [x.strip() for x in nm.split(",")]:
                                 fr["default"] = True
+        self._flat_types(target, g, lambda n: refs.get(n.get("uid")), always=True)
+
+    def _flat_types(self, target, g: dict, const_ref, always: bool = False) -> None:
+        """Types of constants and front-panel terminals from their values' flattened type + data.
+        A readable type replaces n["type"] when `always` or the current one cannot be built; when the
+        type cannot be written in vi_create notation (waveform, picture, class, ...) or a constant's
+        value is unknown, n["flat"] keeps the exact type and default value for vi_create."""
+        from . import gen, td
+
+        def buildable(t):
+            try:
+                gen.parse_type(t)
+                return True
+            except gen.SpecError:
+                return False
         ct, ft = self._helper(CONSTTYPE_VI), self._helper(CTLTYPE_VI)
         fp = None
+        unlabeled = [n for n in g["nodes"] if n["kind"] in ("control", "indicator") and not n.get("label")]
+        # terminals without a label (DFIR leaves some out) are paired, in UID order, with the panel
+        # controls no other terminal names; DFIR's UIDs and the controls' UIDs grow together
+        paired = {}
+        if unlabeled:
+            known = {n.get("label") for n in g["nodes"] if n["kind"] in ("control", "indicator")}
+            rest = [(lb, r) for lb, r in (_try(lambda: self._top_controls(target), []) or [])
+                    if lb not in known or not lb]
+            if len(rest) == len(unlabeled):
+                rest.sort(key=lambda x: _try(lambda: self._uid_of(x[1]), 0))
+                unlabeled.sort(key=lambda n: n.get("uid", 0))
+                paired = {id(n): x for n, x in zip(unlabeled, rest)}
         for n in g["nodes"]:
-            if n["kind"] == "constant" and n.get("uid") in refs:
-                h, ref = ct, refs[n["uid"]]
+            is_const = n["kind"] == "constant"
+            ok = buildable(n.get("type")) if n.get("type") is not None else False
+            if not always and ok and (not is_const or "value" in n):
+                continue
+            if is_const:
+                h, ref = ct, _try(lambda: const_ref(n))
             elif n["kind"] in ("control", "indicator") and n.get("label"):
                 fp = fp if fp is not None else self._fp_refs_by_label(target)
                 h, ref = ft, fp.get(n["label"])
+            elif id(n) in paired:
+                lb, ref = paired[id(n)]
+                h = ft
+                if lb:
+                    n["label"] = lb
             else:
                 continue
             if ref is None:
@@ -2008,9 +2085,34 @@ class LabVIEW:
             h.Run(False)
             if h.GetControlValue("error out")[0]:
                 continue
-            t = _try(lambda: td.from_flattened(h.GetControlValue("type string")))
-            if t is not None:
+            ts = _try(lambda: b"".join(struct.pack(">h", x) for x in h.GetControlValue("type string") or ()))
+            if not ts or len(ts) < 4:
+                continue
+            t = _try(lambda: td.from_flattened(ts))
+            if t is not None and (always or not ok):
                 n["type"] = t
+            if ts[3] == 0x00:  # void: a variant's Value (its contents' type, here none)
+                continue
+            if not buildable(n.get("type")) or (is_const and "value" not in n):
+                ds = _try(lambda: bytes(h.GetControlValue("data bytes") or b""), b"")
+                if len(ds) <= 65536:
+                    n["flat"] = {"flat": ts.hex(), "data": ds.hex()}
+                    if "lvclass" in json.dumps(n.get("type")):  # class data needs its class loaded
+                        n["flat"]["from"] = str(target.Path)
+
+
+def _flat_sources(o, out=None) -> set:
+    """The "from" VIs of the copied types in a spec."""
+    out = set() if out is None else out
+    if isinstance(o, dict):
+        if "flat" in o and isinstance(o.get("from"), str):
+            out.add(o["from"])
+        for v in o.values():
+            _flat_sources(v, out)
+    elif isinstance(o, list):
+        for v in o:
+            _flat_sources(v, out)
+    return out
 
 
 # Helper VIs; LVMCP_VIS_DIR points at another copy (used to test copies saved for older LabVIEW).

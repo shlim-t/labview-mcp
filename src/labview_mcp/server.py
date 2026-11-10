@@ -182,7 +182,9 @@ async def vi_create(
     Types: dbl, sgl, i8..i64, u8..u64, bool, string, path; arrays "dbl[]", "string[][]";
     clusters {"cluster": [{"name": "a", "type": "dbl"}, ...]}; enums {"enum": ["Init", "Run", "Stop"]}
     (values, defaults and vi_run inputs/outputs are item names; a case on an enum has frames
-    {"value": "Init"}, ...).
+    {"value": "Init"}, ...). Any other type (waveform, picture, timestamp, class objects, typedefs,
+    numbers with units) can be copied from an existing VI: vi_dump gives such a control or constant a
+    "flat" entry; use it as the type ({"flat": "...", "data": "..."}, with its default value).
 
     Structures (top level or nested, in "structures"; they hold constants/functions/subvis/
     structures of their own; all names are global and wires are always listed at the top level):

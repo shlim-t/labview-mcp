@@ -41,6 +41,22 @@ def _type(t, what: str):
     return t
 
 
+def _flat_or_type(n: dict, what: str, features: set, need_value: bool = False):
+    """The node's type; its exact copied type ("flat") when that cannot be written otherwise or a
+    constant's value is unknown."""
+    try:
+        t = _type(n.get("type"), what)
+        if not need_value or "value" in n:
+            return t
+        if not n.get("flat"):
+            raise _Unsupported(f"{what}: value unknown")
+    except _Unsupported:
+        if not n.get("flat"):
+            raise
+    features.add("copied type")
+    return n["flat"]
+
+
 def _safe_ids(g: dict) -> dict:
     """vi_dump ids made from labels can start with a digit ("1d_anova_215"); spec names cannot."""
     bad = {n["id"] for n in g["nodes"] if not re.match(r"[A-Za-z_]", n["id"])}
@@ -92,7 +108,7 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
         try:
             if k in ("control", "indicator"):
                 features.add(k)
-                c = {"name": nid, "type": _type(n.get("type"), k)}
+                c = {"name": nid, "type": _flat_or_type(n, k, features)}
                 if n.get("label"):
                     c["label"] = n["label"]
                 if n.get("vi_class") in CONTROL_STYLES:
@@ -103,10 +119,11 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
                 (controls if k == "control" else indicators).append(c)
             elif k == "constant":
                 features.add("constant")
-                t = _type(n.get("type"), "constant")
-                if "value" not in n:
-                    raise _Unsupported("constant: value unknown")
-                contents[where]["constants"].append({"name": nid, "type": t, "value": n["value"]})
+                t = _flat_or_type(n, "constant", features, need_value=True)
+                c = {"name": nid, "type": t}
+                if not (isinstance(t, dict) and "flat" in t):
+                    c["value"] = n["value"]
+                contents[where]["constants"].append(c)
             elif k == "function":
                 fn = FUNCTION_ALIASES.get(n.get("function"), n.get("function"))
                 if catalog is not None and fn not in catalog:
