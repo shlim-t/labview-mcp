@@ -290,6 +290,16 @@ CASES = {
                   ["s.left[2]", "a.y"], ["a.x+y", "s.right"], ["s.right", "fib"],
                   ["z", "p.left"], ["pn.Value", "p.right"], ["p.right", "v"]],
     }, {}, {"fib": 89, "value": 2.5}),
+    # functions LabVIEW's scripting cannot place by name: placed by GObject.Replace, wired by reference
+    # (Merge Errors grown to 4 inputs)
+    "replaced_funcs": ({
+        "controls": [{"name": "e1", "type": "error"}, {"name": "e2", "type": "error"},
+                     {"name": "e3", "type": "error", "default": [True, 42, "boom"]}, {"name": "e4", "type": "error"}],
+        "indicators": [{"name": "eo", "type": "error", "label": "merged"}, {"name": "fc", "type": "bool", "label": "first"}],
+        "functions": [{"name": "m", "function": "Merge Errors", "size": 4}, {"name": "f", "function": "First Call?"}],
+        "wires": [["e1", "m.error in[1]"], ["e2", "m.error in[2]"], ["e3", "m.error in[3]"], ["e4", "m.error in[4]"],
+                  ["m.error out", "eo"], ["f.First Call?: T/F", "fc"]],
+    }, {}, {"merged": [True, 42, "boom"], "first": True}),
     # Unbundle By Name / Bundle By Name: elements chosen by name, in any order
     "by_name": ({
         "controls": [{"name": "c", "type": {"cluster": [{"name": "alpha", "type": "dbl"},

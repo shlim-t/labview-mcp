@@ -485,6 +485,8 @@ def parse(text: str, catalog: dict[str, list[str]] | None = None, subvi_terms=No
         cls = n.get("class")
         if cls in _INDEXED_TERMS and t < len(_INDEXED_TERMS[cls]) and n.get("_nterms", 0) <= len(_INDEXED_TERMS[cls]):
             return f"{n['id']}.{_INDEXED_TERMS[n['class']][t]}"
+        if n.get("class") == "MergeErrorsNode":  # error out, then error in 1..n
+            return f"{n['id']}." + ("error out" if t == 0 else f"error in[{t}]")
         if n.get("class") == "PrintfNode":
             return f"{n['id']}." + (_PRINTF[t] if t < len(_PRINTF) else f"input {t - len(_PRINTF) + 1}")
         if k in ("control", "indicator", "constant", "structure_terminal"):

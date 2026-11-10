@@ -395,9 +395,13 @@ class Script:
     stacks: list = None
     # case output tunnels some frames leave unwired: set to "Use Default if Unwired" (indexes into outs)
     use_default: list = None
+    # functions a script cannot place by name: placed as a stand-in, then replaced by the palette
+    # object of that name (GObject.Replace): [(k, function, size)], k = index into outs
+    replaces: list = None
 
     def has_nodes(self) -> bool:
-        return bool(self.pnodes) or bool(self.ref_wires) or bool(self.stacks) or bool(self.use_default) or any(fr["script"] is not None and fr["script"].has_nodes()
+        return bool(self.pnodes) or bool(self.ref_wires) or bool(self.stacks) or bool(self.use_default) \
+            or bool(self.replaces) or any(fr["script"] is not None and fr["script"].has_nodes()
                                         for ev in self.events or [] for fr in ev["frames"])
 
 
@@ -830,6 +834,9 @@ class _Builder:
             if n.kind == "constant":
                 ti = self.add_type(n.spec.get("type", "dbl"), n.spec.get("value"))
                 out.append(f"<Constant name={quoteattr(name)} typeindex=\"{ti}\" position=\"{p}\"{o}></Constant>")
+            elif n.kind == "function" and n.spec["function"].strip() in getattr(self, "replace", ()):
+                # a stand-in, replaced by the real palette object once placed
+                out.append(f"<Function name={quoteattr(name)} style=\"Add\" position=\"{p}\"{o}></Function>")
             elif n.kind == "function":
                 style = n.spec["function"].strip()
                 size = n.spec.get("size", n.spec.get("inputs"))
@@ -942,7 +949,7 @@ def _assign_connector(controls: list[dict], default="auto") -> dict[str, str]:
 
 
 def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(30, 30),
-          edit: bool = False, refs: tuple = ()) -> Script:
+          edit: bool = False, refs: tuple = (), replace: frozenset = frozenset()) -> Script:
     """existing: objects already on the diagram that the spec refers to, in ObjRefsIn order; each a
     name (a front-panel terminal) or {"name", "kind", "spec"} (see _Builder.add_existing). Used by
     vi_edit. New controls then stay off the connector pane unless they ask for a slot."""
@@ -976,6 +983,15 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
             # an enum's value goes through COM as its item index
             defaults[labels[c["name"]]] = t.enum_index(c["default"]) if t.kind == "enum" else c["default"]
     b.collect(spec, "")
+    b.replace = replace
+    replaces = []
+    for nm, n in b.nodes.items():
+        if n.kind == "function" and n.bind is None and str(n.spec.get("function", "")).strip() in replace:
+            if edit or existing or b.event_frame(nm):
+                raise SpecError(f"function {nm!r} ({n.spec['function']}) cannot be placed by LabVIEW's "
+                                "scripting by name; vi_create places it outside event structures only")
+            replaces.append((b.out_index.setdefault(nm, len(b.out_index)), n.spec["function"].strip(),
+                             n.spec.get("size")))
     for nm in refs:  # objects whose references the caller wants back (in Script.outs order)
         b.out_index.setdefault(nm, len(b.out_index))
     if not edit and not existing and not any(n.kind not in ("control", "indicator") for n in b.nodes.values()):
@@ -1081,6 +1097,7 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
                 sorted(events, key=lambda e: b.event_order.index(e["name"]))],
         pnodes=pnodes, late=late, late_refs=late_refs, ref_wires=ref_wires,
         stacks=sorted((b.out_index[n], k) for n, k in b.sr_stack.items()),
+        replaces=replaces,
         use_default=use_default,
     )
 
@@ -1096,6 +1113,8 @@ def _by_ref(b: _Builder, end: str) -> bool:
         return bool(m) and int(m.group(1)) >= 2
     if n is None or n.kind not in ("function", "subvi"):
         return False
+    if n.kind == "function" and str(n.spec.get("function", "")).strip() in getattr(b, "replace", ()):
+        return True  # replaced after the script ran: wired between terminal references
     fn = str(n.spec.get("function", "")).strip()
     # a grown Index Array's index terminals have no name a script accepts
     grown_index = fn == "Index Array" and n.spec.get("size") is not None and re.fullmatch(r"index(\[\d+\])?", term)

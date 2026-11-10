@@ -207,6 +207,9 @@ async def vi_create(
                        "functions": [{"name": "a", "function": "Add"}]}],
        "wires": [["n", "L.N"], ["zero", "acc.left"], ["acc.left", "a.x"], ["L.i", "a.y"],
                  ["a.x+y", "acc.right"], ["acc.right", "total"]]}
+    Functions LabVIEW's scripting has no name for (Merge Errors, First Call?, To Time Stamp, TDMS,
+    newer file I/O, Shared Variable) are placed by their palette name and wired by terminal
+    reference (not inside event frames); Merge Errors: "size" = inputs, wired m.error in[1], [2], ...
     Growable functions take "size" (check it with function_terminals(name, size)):
       {"name": "cat", "function": "Concatenate Strings", "size": 3} -> inputs cat.element[1..3],
       output cat.concatenated string; Build Array likewise ("appended array"); Unbundle (by

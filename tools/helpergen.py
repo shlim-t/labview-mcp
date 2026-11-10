@@ -349,7 +349,7 @@ HELPERS["lvmcp_termctl"] = {
 }
 # Terminal.Connect Wire: a wire between two terminals given by reference (terminals whose names a
 # script cannot use: "new element/subarray", "number: 0 to 1", unnamed ones)
-HELPERS["lvmcp_connect", "lvmcp_srright", "lvmcp_sradd", "lvmcp_termdiag", "lvmcp_framediags", "lvmcp_caseselector", "lvmcp_usedefault"] = {
+HELPERS["lvmcp_connect", "lvmcp_srright", "lvmcp_sradd", "lvmcp_termdiag", "lvmcp_framediags", "lvmcp_caseselector", "lvmcp_usedefault", "lvmcp_inputcnt"] = {
     "controls": [("reference", "ref:Terminal"), ("other", "ref:Terminal")],
     "indicators": [("error out", "error")],
     "nodes": [{"name": "k", "kind": "invoke", "class": "Terminal", "method": "Connect Wire"}],
@@ -585,6 +585,15 @@ HELPERS["lvmcp_usedefault"] = {
     "nodes": [{"name": "c", "kind": "constant", "type": "bool", "value": True},
               {"name": "u", "kind": "property", "class": "SelectorTunnel", "items": ["UseDefault"], "write": True}],
     "wires": [("reference", "u.reference"), ("c", "u.UseDefault"), ("u.error out", "error out")],
+}
+
+# Bundler.InputCnt (write): the number of inputs of a grown Bundler-class node (Merge Errors placed by
+# GObject.Replace)
+HELPERS["lvmcp_inputcnt"] = {
+    "controls": [("reference", "ref:Bundler"), ("count", "i32")],
+    "indicators": [("error out", "error")],
+    "nodes": [{"name": "p", "kind": "property", "class": "Bundler", "items": ["InputCnt"], "write": True}],
+    "wires": [("reference", "p.reference"), ("count", "p.InputCnt"), ("p.error out", "error out")],
 }
 
 ORDER = ["lvmcp_move", "lvmcp_propwrite", "lvmcp_proplink", "lvmcp_invokelink", "lvmcp_uid", "lvmcp_classname",

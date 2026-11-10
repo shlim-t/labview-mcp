@@ -5,6 +5,7 @@ so callers use `LabVIEW.call(fn, *args)` which returns a concurrent Future.
 """
 from __future__ import annotations
 
+import collections
 import datetime as _dt
 import json
 import os
@@ -382,6 +383,10 @@ class LabVIEW:
         from . import gen
 
         script = gen.build(spec)  # validates before LabVIEW is touched
+        # functions LabVIEW's scripting cannot place by name (Merge Errors, First Call?, TDMS, ...)
+        unplaceable = frozenset(f for f in _spec_functions(spec) if self.node_terminals(f) is None)
+        if unplaceable:
+            script = gen.build(spec, replace=unplaceable)
         # copied class types ({"flat": ..., "from": VI}) need their classes in memory: keep the VIs
         # they were copied from open while building
         keep = [_try(lambda: self._vi(f)) for f in sorted(_flat_sources(spec)) if Path(f).is_file()]  # noqa: F841
@@ -424,6 +429,8 @@ class LabVIEW:
             self._finish_nodes(target, script, out_refs, [], labels,
                                lambda s, refs: self._gen_script(target, s.xml, s.type_strings, s.data_strings,
                                                                 refs=refs, raw=True))
+            if script.replaces:
+                self._replace_functions(target, script.replaces, out_refs)
             srs = self._stack_shift_registers(target, script.stacks, out_refs) if script.stacks else {}
             if script.ref_wires:
                 self._connect_by_ref(target, script.ref_wires, out_refs, srs)
@@ -658,6 +665,29 @@ class LabVIEW:
                 return str(c)
         return "Control"
 
+    def _replace_functions(self, target, replaces: list, outs: list) -> None:
+        """Replace stand-in nodes by the palette functions named (GObject.Replace with the palette
+        name); outs[k] then refers to the new node."""
+        rep, cnt = self._helper(REPLACE_VI), None
+        for k, fn, size in replaces:
+            before = self._all_of(target, "Node")
+            rep.SetControlValue("reference", outs[k])
+            rep.SetControlValue("Style", 4294967295)
+            rep.SetControlValue("Palette String", fn)
+            self._run_checked(rep, f"placing {fn!r} (it has no scripting name)")
+            after = self._all_of(target, "Node")
+            new = [u for u in after if u not in before]
+            if len(new) != 1:
+                raise LabVIEWError(f"placing {fn!r}: the new node was not found")
+            outs[k] = after[new[0]]
+            if size:
+                bund = self._all_of(target, "Bundler")
+                if new[0] in bund:  # Merge Errors: as many inputs as wired
+                    cnt = cnt or self._helper(INPUTCNT_VI)
+                    cnt.SetControlValue("reference", bund[new[0]])
+                    cnt.SetControlValue("count", int(size))
+                    self._run_checked(cnt, f"growing {fn!r} to {size} inputs")
+
     def _owners(self, target) -> dict:
         """{uid: owner uid} of every block-diagram object."""
         h = self._helper(UIDS_VI)
@@ -808,6 +838,8 @@ class LabVIEW:
                 uid = self._uid_of(outs[k])
                 own = [(n, r) for _, o, n, _, r in sorted(rows, key=lambda x: x[0]) if o == uid]
                 hits = [r for n, r in own if n == name or not name]
+                if not hits:  # names differ in case between LabVIEW versions ("time stamp")
+                    hits = [r for n, r in own if str(n).lower() == name.lower()]
                 m = re.fullmatch(r"(.*)\[(\d+)\]", name)
                 if not hits and m:  # "index[2]": the 2nd terminal named "index", in node order
                     same = [r for n, r in own if n == m.group(1)]
@@ -1113,6 +1145,45 @@ class LabVIEW:
         cache[key] = [(n, src) for _, n, src in terms]
         return cache[key]
 
+    def replaced_terminals(self, name: str, size: int | None = None) -> list[tuple[str, bool]] | None:
+        """Terminals of a palette function placed by GObject.Replace (no scripting name), in node order;
+        repeated names numbered "name[k]". None if it cannot be placed that way either."""
+        cache = self.__dict__.setdefault("_repl_terms", {})
+        if (name, size) in cache:
+            return cache[(name, size)]
+        vi = self._probe_vi()
+        self._probe_n += 1
+        status, _, _ = self._gen_script(vi, f"<Script><Function name=\"r{self._probe_n}\" style=\"Add\" "
+                                            "position=\"(0,0)\" out=\"0\"></Function></Script>", [], [])
+        out = list(self._gen_out) if not status else []
+        if not out:
+            return None
+        outs = [out[0]]
+        try:
+            self._replace_functions(vi, [(0, name, size)], outs)
+        except LabVIEWError:
+            _try(lambda: self._delete(vi, [out[0]]))
+            cache[(name, size)] = None
+            return None
+        uid = self._uid_of(outs[0])
+        h = self._helper(UIDS_VI)
+        h.SetControlValue("VI Refnum", vi)
+        h.SetControlValue("Traverse Target", 1)
+        h.SetControlValue("Class Name", "Terminal")
+        h.Run(False)
+        terms = sorted((u, n, bool(src)) for u, o, n, src in zip(
+            h.GetControlValue("UIDs") or (), h.GetControlValue("Owner UIDs") or (),
+            h.GetControlValue("Names") or (), h.GetControlValue("Is Source") or ()) if o == uid)
+        _try(lambda: self._delete(vi, [outs[0]]))
+        count = collections.Counter(n for _, n, _ in terms)
+        seen = collections.Counter()
+        res = []
+        for _, n, src in terms:
+            seen[n] += 1
+            res.append((f"{n}[{seen[n]}]" if count[n] > 1 else n, src))
+        cache[(name, size)] = res
+        return res
+
     def _probe_vi(self):
         """A scratch VI kept in memory (never saved) for probing terminal names."""
         if getattr(self, "_probe", None) is None:
@@ -1140,6 +1211,19 @@ class LabVIEW:
         cache = self.__dict__.setdefault("_term_cache", {})
         if (name, size) in cache:
             return cache[(name, size)]
+        if self.node_terminals(name) is None:
+            # no scripting name: vi_create places it by its palette name instead
+            real = self.replaced_terminals(name, size)
+            if real is not None:
+                res = {"function": name, "size": size, "terminals": [n for n, _ in real],
+                       "inputs": [n for n, out in real if not out], "outputs": [n for n, out in real if out],
+                       "help_labels": labels,
+                       "note": "LabVIEW's scripting has no name for this function; vi_create places it by its "
+                               "palette name and wires it by terminal reference. Repeated names are numbered "
+                               "(\"error in[2]\")." + (" It grows: give \"size\" = number of inputs."
+                                                        if any(n.endswith("[2]") for n, _ in real) else "")}
+                cache[(name, size)] = res
+                return res
         vi = self._probe_vi()
         if size is None:
             node = lambda k: f"<Function name=\"f{k}\" style={quoteattr(name)} position=\"(0,0)\"></Function>"
@@ -2431,6 +2515,22 @@ TERMDIAG_VI = VIS_DIR / "lvmcp_termdiag.vi"
 FRAMEDIAGS_VI = VIS_DIR / "lvmcp_framediags.vi"
 CASESELECTOR_VI = VIS_DIR / "lvmcp_caseselector.vi"
 USEDEFAULT_VI = VIS_DIR / "lvmcp_usedefault.vi"
+INPUTCNT_VI = VIS_DIR / "lvmcp_inputcnt.vi"
+
+
+def _spec_functions(spec: dict) -> set:
+    """The palette function names a vi_create spec uses, at any depth."""
+    out = set()
+    for f in spec.get("functions", []) or []:
+        if isinstance(f, dict) and isinstance(f.get("function"), str):
+            out.add(f["function"].strip())
+    for s in spec.get("structures", []) or []:
+        if isinstance(s, dict):
+            out |= _spec_functions(s)
+            for c in (s.get("cases") or []) + (s.get("events") or []):
+                if isinstance(c, dict):
+                    out |= _spec_functions(c)
+    return out
 
 
 def parse_event_caption(cap: str) -> list[dict]:
