@@ -389,6 +389,23 @@ UI_CASES = {
                   ["t", "f.Discard?"]],
     }, {"STOP": 0, "x": 1, "last": 1, "ticks": 2},
         ['[0] "STOP": Value Change', '[1] "x": Value Change', '[2] Timeout', '[3] Panel Close?']),
+    # state in a shift register through the event structure: one frame handles two buttons ("more")
+    # and counts, the STOP frame passes the count on unchanged (frame "wires")
+    "event_state": ({
+        "controls": [{"name": "stop", "type": "bool", "label": "STOP", "style": "Stop Button"},
+                     {"name": "inc", "type": "bool", "label": "Add", "style": "OK Button"},
+                     {"name": "inc2", "type": "bool", "label": "Add 2", "style": "OK Button"}],
+        "indicators": [{"name": "count", "type": "i32"}],
+        "constants": [{"name": "zero", "type": "i32", "value": 0}],
+        "structures": [{"name": "W", "type": "while_loop", "shift_registers": ["n"],
+                        "structures": [{"name": "E", "type": "event", "events": [
+                            {"control": "inc", "more": [{"control": "inc2"}],
+                             "functions": [{"name": "a", "function": "Increment"}]},
+                            {"control": "stop", "wires": [["n.left", "n.right"]]}]}]}],
+        "wires": [["zero", "n.left"], ["n.left", "a.x"], ["a.x+1", "n.right"], ["stop", "W.stop"],
+                  ["n.right", "count"]],
+    }, {"STOP": 1, "Add": 0},
+        ['[0] "Add", "Add 2": Value Change', '[1] "STOP": Value Change']),
 }
 
 
@@ -403,6 +420,9 @@ UI_RUNS = {
     # NewVal reaches "last"; the Timeout frame has run several times while waiting
     "vi_events": ([{"set": {"x": 5}}, {"wait": 0.4}, {"read": ["last", "ticks"]}, {"click": "STOP"}],
                   lambda r: r["actions"][2]["read"]["last"] == 5.0 and r["actions"][2]["read"]["ticks"] > 2),
+    # two counts (one per button); the STOP frame keeps the count
+    "event_state": ([{"click": "Add"}, {"wait": 0.2}, {"click": "Add 2"}, {"wait": 0.2}, {"click": "STOP"}],
+                    lambda r: r["values"]["count"] == 2),
 }
 
 

@@ -245,7 +245,11 @@ async def vi_create(
     Event data: "data": "d" names the frame's event data node; wire "d.NewVal", "d.OldVal",
     "d.Coords", "d.Button", "d.CtlRef", ... (the node shows the items that are wired).
     Code in a frame may be wired to code in the same
-    frame and to objects outside the event structure (not to shift registers). A front-panel terminal
+    frame and to objects outside the event structure, also shift registers and the output tunnels of
+    a case around it. One frame can handle more events: "more": [{"control": "b"}, {"event":
+    "Panel Close"}]. A value a frame passes on unchanged (state in a shift register) is listed in that
+    frame's "wires": {"control": "stop", "wires": [["state.left", "state.right"]]}. A case output
+    tunnel left unwired in some frames gives its default there. A front-panel terminal
     used by only one frame is placed in it (read when the event happens), and [button, "W.stop"]
     reads the button in its own frame and stops the loop W, as in NI's templates. Example:
       {"controls": [{"name": "stop", "type": "bool", "style": "Stop Button"},

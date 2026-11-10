@@ -349,7 +349,7 @@ HELPERS["lvmcp_termctl"] = {
 }
 # Terminal.Connect Wire: a wire between two terminals given by reference (terminals whose names a
 # script cannot use: "new element/subarray", "number: 0 to 1", unnamed ones)
-HELPERS["lvmcp_connect", "lvmcp_srright", "lvmcp_sradd"] = {
+HELPERS["lvmcp_connect", "lvmcp_srright", "lvmcp_sradd", "lvmcp_termdiag", "lvmcp_framediags", "lvmcp_caseselector", "lvmcp_usedefault"] = {
     "controls": [("reference", "ref:Terminal"), ("other", "ref:Terminal")],
     "indicators": [("error out", "error")],
     "nodes": [{"name": "k", "kind": "invoke", "class": "Terminal", "method": "Connect Wire"}],
@@ -545,6 +545,46 @@ HELPERS["lvmcp_sradd"] = {
     "indicators": [("error out", "error")],
     "nodes": [{"name": "a", "kind": "invoke", "class": "LeftShiftRegister", "method": "Add Element"}],
     "wires": [("reference", "a.reference"), ("a.error out", "error out")],
+}
+
+# Terminal.Diagram -> UID: the diagram a terminal sits on (which frame a tunnel's inner terminal is in)
+HELPERS["lvmcp_termdiag"] = {
+    "controls": [("reference", "ref:Terminal")],
+    "indicators": [("UID", "i32"), ("error out", "error")],
+    "nodes": [{"name": "p", "kind": "property", "class": "Terminal", "items": ["Diagram"]},
+              {"name": "u", "kind": "property", "class": "GObject", "items": ["UID"]}],
+    "wires": [("reference", "p.reference"), ("p.Diagram", "u.reference"), ("p.error out", "u.error in (no error)"),
+              ("u.UID", "UID"), ("u.error out", "error out")],
+}
+
+# MultiFrameStructure.Diagrams[]: the frames' diagrams in frame order (vi_dump scan; their UIDs are
+# not in frame order once frames were added or moved)
+HELPERS["lvmcp_framediags"] = {
+    "controls": [("reference", "ref:MultiFrameStructure")],
+    "indicators": [("error out", "error")],
+    "nodes": [{"name": "p", "kind": "property", "class": "MultiFrameStructure", "items": ["Diagrams"]}],
+    "wires": [("reference", "p.reference"), ("p.error out", "error out")],
+    "term_indicators": [("p", "Diagrams")],
+}
+
+# CaseStructure.Selector -> UID: which tunnel object is a case's selector (vi_dump scan)
+HELPERS["lvmcp_caseselector"] = {
+    "controls": [("reference", "ref:CaseStructure")],
+    "indicators": [("UID", "i32"), ("error out", "error")],
+    "nodes": [{"name": "p", "kind": "property", "class": "CaseStructure", "items": ["Selector"]},
+              {"name": "u", "kind": "property", "class": "GObject", "items": ["UID"]}],
+    "wires": [("reference", "p.reference"), ("p.Selector", "u.reference"), ("p.error out", "u.error in (no error)"),
+              ("u.UID", "UID"), ("u.error out", "error out")],
+}
+
+# SelectorTunnel.Use Default if Unwired (write): a case output tunnel that some frames leave unwired
+# (vi_create)
+HELPERS["lvmcp_usedefault"] = {
+    "controls": [("reference", "ref:SelectorTunnel")],
+    "indicators": [("error out", "error")],
+    "nodes": [{"name": "c", "kind": "constant", "type": "bool", "value": True},
+              {"name": "u", "kind": "property", "class": "SelectorTunnel", "items": ["UseDefault"], "write": True}],
+    "wires": [("reference", "u.reference"), ("c", "u.UseDefault"), ("u.error out", "error out")],
 }
 
 ORDER = ["lvmcp_move", "lvmcp_propwrite", "lvmcp_proplink", "lvmcp_invokelink", "lvmcp_uid", "lvmcp_classname",

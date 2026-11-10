@@ -327,7 +327,8 @@ STRUCTURE_HELP = (
     "itself have no \"control\": {\"event\": \"Timeout\", \"timeout\": 100} (ms), \"Panel Close?\", "
     "\"Key Down\", ... An entry may name its event data node, \"data\": \"d\" (wire \"d.NewVal\", "
     "\"d.OldVal\", \"d.Coords\", ...), and for filter events (ending in \"?\") its filter node, "
-    "\"filter\": \"f\" (wire a True constant to \"f.Discard?\").")
+    "\"filter\": \"f\" (wire a True constant to \"f.Discard?\"). \"more\": [{\"control\": \"b\"}] adds events to "
+    "a frame; a frame's \"wires\": [[\"sr.left\", \"sr.right\"]] pass a value through it unchanged.")
 
 
 NODE_HELP = (
@@ -392,9 +393,11 @@ class Script:
     ref_wires: list = None
     # stacked shift registers: [(k, elements)], k = index into outs
     stacks: list = None
+    # case output tunnels some frames leave unwired: set to "Use Default if Unwired" (indexes into outs)
+    use_default: list = None
 
     def has_nodes(self) -> bool:
-        return bool(self.pnodes) or bool(self.ref_wires) or bool(self.stacks) or any(fr["script"] is not None and fr["script"].has_nodes()
+        return bool(self.pnodes) or bool(self.ref_wires) or bool(self.stacks) or bool(self.use_default) or any(fr["script"] is not None and fr["script"].has_nodes()
                                         for ev in self.events or [] for fr in ev["frames"])
 
 
@@ -526,11 +529,27 @@ class _Builder:
             for i, fr in enumerate(events):
                 if not isinstance(fr, dict):
                     raise SpecError(f"event structure {name!r}: each entry of events must be an object")
-                extra = set(fr) - {"control", "event", "data", "filter", "timeout", *_CONTENT_KEYS}
+                extra = set(fr) - {"control", "event", "data", "filter", "timeout", "more", "wires",
+                                   *_CONTENT_KEYS}
                 if extra:
                     raise SpecError(f"event structure {name!r} event {i}: unknown keys {sorted(extra)}")
                 ev = fr.get("event", "Value Change")
                 where = f"event structure {name!r} event {i}"
+                more = fr.get("more", [])
+                if not isinstance(more, list) or not all(isinstance(m, dict) and set(m) <= {"control", "event"}
+                                                          for m in more):
+                    raise SpecError(f"{where}: \"more\" lists further events this frame handles: "
+                                    "[{\"control\": \"b\", \"event\": \"Value Change\"}, {\"event\": \"Panel Close\"}]")
+                for m in more:
+                    me = m.get("event", "Value Change")
+                    if m.get("control") is not None:
+                        src = self.nodes.get(m["control"])
+                        if src is None or src.kind not in ("control", "indicator") or me not in CONTROL_EVENTS:
+                            raise SpecError(f"{where}: \"more\" entry {m!r}: needs a control or indicator of "
+                                            f"this spec and a control event ({sorted(CONTROL_EVENTS)})")
+                    elif me not in VI_EVENTS or me == "Timeout":
+                        raise SpecError(f"{where}: \"more\" entry {m!r}: events of the VI itself are "
+                                        f"{sorted(e for e in VI_EVENTS if e != 'Timeout')}")
                 if fr.get("control") is not None:
                     src = self.nodes.get(fr.get("control"))
                     if src is None or src.kind not in ("control", "indicator"):
@@ -543,9 +562,9 @@ class _Builder:
                                     f"\"control\"): {sorted(VI_EVENTS)}")
                 if ev == "Timeout":
                     t = fr.get("timeout")
-                    if not isinstance(t, int) or isinstance(t, bool) or t < 0:
+                    if not isinstance(t, int) or isinstance(t, bool) or t < -1:
                         raise SpecError(f"{where}: a Timeout event needs \"timeout\": milliseconds to wait "
-                                        "for other events, e.g. 100")
+                                        "for other events, e.g. 100 (-1: wait forever)")
                     if sum(e.get("event") == "Timeout" for e in events) > 1:
                         raise SpecError(f"event structure {name!r} has more than one Timeout event")
                 elif "timeout" in fr:
@@ -849,7 +868,7 @@ class _Builder:
                         out.append("</Frame>")
                     for k, t in enumerate(side):
                         out.append(f"<Tunnel name={quoteattr(t.name)} location=\"right\" "
-                                   f"offset=\"{PAD_TOP + 30 * k}\"></Tunnel>")
+                                   f"offset=\"{PAD_TOP + 30 * k}\"{self.out_attr(t.name)}></Tunnel>")
                     out.append("</MultiframeStructure>")
                 else:
                     style = "For Loop" if n.kind == "for" else "While Loop"
@@ -923,7 +942,7 @@ def _assign_connector(controls: list[dict], default="auto") -> dict[str, str]:
 
 
 def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(30, 30),
-          edit: bool = False) -> Script:
+          edit: bool = False, refs: tuple = ()) -> Script:
     """existing: objects already on the diagram that the spec refers to, in ObjRefsIn order; each a
     name (a front-panel terminal) or {"name", "kind", "spec"} (see _Builder.add_existing). Used by
     vi_edit. New controls then stay off the connector pane unless they ask for a slot."""
@@ -957,6 +976,8 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
             # an enum's value goes through COM as its item index
             defaults[labels[c["name"]]] = t.enum_index(c["default"]) if t.kind == "enum" else c["default"]
     b.collect(spec, "")
+    for nm in refs:  # objects whose references the caller wants back (in Script.outs order)
+        b.out_index.setdefault(nm, len(b.out_index))
     if not edit and not existing and not any(n.kind not in ("control", "indicator") for n in b.nodes.values()):
         # A diagram holding only terminals is saved by LabVIEW as a file it cannot reopen.
         raise SpecError("the diagram needs at least one constant, function, subVI or structure")
@@ -1004,6 +1025,21 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
         raise SpecError("event structures can only be made by vi_create for now")
     pnodes, late, late_refs = _plan_nodes(b, late_raw, labels)
 
+    # a case output tunnel wired in only some frames gives its type's default in the others
+    use_default = []
+    raw = [w if not isinstance(w, dict) else [w.get("from"), w.get("to")]
+           for w in list(spec.get("wires", []) or []) + b.extra_wires]
+    for t in [m for m in b.nodes.values() if m.kind == "tunnel" and b.nodes[m.owner].kind == "case"
+              and b.nodes[m.owner].bind is None]:
+        fed = set()
+        for a, z in raw:
+            if z == t.name and a.partition(".")[0] in b.nodes:
+                for body in b.bodies(t.owner):
+                    if b.item_in(a.partition(".")[0], body) is not None:
+                        fed.add(body)
+        if len(fed) < len(b.bodies(t.owner)):
+            use_default.append(b.out_index.setdefault(t.name, len(b.out_index)))
+
     pos: dict[str, tuple[int, int]] = {}
     b.place("", origin, wires, pos)
     for n in b.nodes.values():  # new contents of existing structures, relative to the structure
@@ -1045,6 +1081,7 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
                 sorted(events, key=lambda e: b.event_order.index(e["name"]))],
         pnodes=pnodes, late=late, late_refs=late_refs, ref_wires=ref_wires,
         stacks=sorted((b.out_index[n], k) for n, k in b.sr_stack.items()),
+        use_default=use_default,
     )
 
 
@@ -1193,8 +1230,24 @@ def _plan_events(b: _Builder, frame_wires: dict, main_wires: list, labels: dict)
         frames = []
         for i, fr in enumerate(n.spec["events"]):
             fid = f"{name}#{i}"
-            fw = frame_wires.get(fid, [])
             inside = {m for m in b.nodes if b.event_frame(m) == fid}
+            fw, cross = [], []
+            for w in frame_wires.get(fid, []):
+                outer = [e for e in w if e.partition(".")[0] not in inside
+                         and (b.nodes[e.partition(".")[0]].kind in ("shiftreg", "tunnel")
+                              or (b.nodes[e.partition(".")[0]].kind in _NODE_KINDS
+                                  and not b.event_frame(e.partition(".")[0])))]
+                if not outer:
+                    fw.append(w)
+                    continue
+                if len(outer) == 2:
+                    raise SpecError(f"wire {list(w)!r}: neither end is in event frame {fid}")
+                # a case's output tunnel: its inner terminal in the case frame holding this structure
+                cross.append([("frame", e) if e not in outer else
+                              ("tun", b.out_index.setdefault(e, len(b.out_index)),
+                               b.out_index.setdefault(name, len(b.out_index)))
+                              if b.nodes[e.partition(".")[0]].kind == "tunnel" else
+                              _ref_end(b, e, labels, w, False, j) for j, e in enumerate(w)])
             bind = sorted(ends(fw) - inside)
             for o in bind:
                 k = b.nodes[o].kind
@@ -1221,19 +1274,57 @@ def _plan_events(b: _Builder, frame_wires: dict, main_wires: list, labels: dict)
                 terms.append(ctl)
             contents = {k: v for k, v in fr.items() if k in _CONTENT_KEYS}
             script = None
-            if fw or any(contents.values()):
+            # the frame's ends of the cross wires: its own objects (their references come back from
+            # the frame's script), its event data node, or a front-panel terminal
+            want = []
+            for c in cross:
+                for k, e in enumerate(c):
+                    if e[0] != "frame":
+                        continue
+                    nm, _, term = e[1].partition(".")
+                    kind = b.nodes[nm].kind
+                    if kind == "evdata":
+                        ev_nodes.setdefault(nm, {"role": b.nodes[nm].spec["role"], "items": []})
+                        if term not in ev_nodes[nm]["items"]:
+                            ev_nodes[nm]["items"] = sorted({*ev_nodes[nm]["items"], term})
+                        c[k] = ("evdata", nm, term)
+                    elif kind in ("control", "indicator"):
+                        c[k] = ("label", labels[nm], "")
+                    else:
+                        if nm not in want:
+                            want.append(nm)
+                        c[k] = ("fout", nm, term)
+            # "wires" of the frame: between objects outside it, drawn through the frame (a value the
+            # frame passes on unchanged, e.g. a shift register's state), via the structure's tunnels
+            through = []
+            for w in fr.get("wires", []) or []:
+                if not (isinstance(w, (list, tuple)) and len(w) == 2 and all(isinstance(x, str) for x in w)):
+                    raise SpecError(f"event {name!r} frame {i}: \"wires\" entries are [\"from\", \"to\"]")
+                for e in w:
+                    if e.partition(".")[0] not in b.nodes or e.partition(".")[0] in inside:
+                        raise SpecError(f"event {name!r} frame {i}: \"wires\" joins objects outside the "
+                                        f"frame through it; {e!r} is not one")
+                through.append(tuple(_ref_end(b, e, labels, w, False, j) for j, e in enumerate(w)))
+            if fw or any(contents.values()) or want:
                 script = build({**contents, "wires": fw},
                                existing=[{"name": o, "kind": _FRAME_BIND[b.nodes[o].kind]} for o in bind]
                                + [{"name": m, "kind": "function"} for m in ev_nodes],
-                               origin=(40, 40), edit=True)
+                               origin=(40, 40), edit=True, refs=tuple(want))
+                for c in cross:
+                    for k, e in enumerate(c):
+                        if e[0] == "fout":
+                            c[k] = ("fout", script.outs.index(e[1]), e[2])
                 if script.events:
                     raise SpecError(f"event {name!r} frame {i}: an event structure inside an event "
                                     "frame is not supported")
             ev = fr.get("event", "Value Change")
             frames.append({"control": labels[ctl] if ctl else None,
                            "event": CONTROL_EVENTS[ev] if ctl else VI_EVENTS[ev], "event_name": ev,
+                           "more": [(labels[m["control"]], CONTROL_EVENTS[m.get("event", "Value Change")])
+                                    if m.get("control") else (None, VI_EVENTS[m["event"]])
+                                    for m in fr.get("more", [])],
                            "move": [labels[t] for t in terms], "bind": bind + list(ev_nodes),
-                           "evdata": ev_nodes, "script": script})
+                           "evdata": ev_nodes, "script": script, "cross": cross, "through": through})
         entry = {"name": name, "frames": frames}
         tmo = next((fr for fr in n.spec["events"] if fr.get("event") == "Timeout"), None)
         if tmo is not None:  # wired to the structure's Timeout terminal once it exists

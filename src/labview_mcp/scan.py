@@ -51,7 +51,8 @@ def _is_terminal(cls: str) -> bool:
     return cls.endswith("Terminal") and cls != "ControlTerminal"
 
 
-def build(rows: list[Row], labels: dict[int, str], shift_registers: dict | None = None) -> dict:
+def build(rows: list[Row], labels: dict[int, str], shift_registers: dict | None = None,
+          frame_order: dict | None = None, selectors: dict | None = None) -> dict:
     """shift_registers: {left shift register UID: (its right side's UID, its top)}, to pair the two
     sides and to order the elements of a stacked shift register (top first)."""
     by_uid: dict[int, Row] = {}
@@ -82,6 +83,9 @@ def build(rows: list[Row], labels: dict[int, str], shift_registers: dict | None 
     for r in sorted(rows, key=lambda r: r.uid):
         if r.cls == "Diagram" and r.owner in kind_of:
             frames.setdefault(r.owner, []).append(r.uid)
+    for s, order in (frame_order or {}).items():  # LabVIEW's frame order, when it was read
+        if s in frames and sorted(order) == sorted(frames[s]):
+            frames[s] = list(order)
     container: dict[int, str] = {}
     for r in rows:
         if r.cls == "TopLevelDiagram":
@@ -153,8 +157,10 @@ def build(rows: list[Row], labels: dict[int, str], shift_registers: dict | None 
 
     # tunnels and shift registers: name their terminals after the tunnel object
     tunnel_id: dict[int, str] = {}
+    # a case's selector is a tunnel object: its outer terminal is "<case>.selector"
+    selector_of = {t: c for c, t in (selectors or {}).items() if c in node_id and t in by_uid}
     for r in rows:
-        if r.uid in sr_top or r.uid in stack:
+        if r.uid in sr_top or r.uid in stack or r.uid in selector_of:
             continue
         if r.cls.endswith("Tunnel") or "ShiftRegister" in r.cls:
             tunnel_id[r.uid] = f"{'tunnel' if 'Tunnel' in r.cls else 'shift_register'}_{r.uid}"
@@ -198,13 +204,22 @@ def build(rows: list[Row], labels: dict[int, str], shift_registers: dict | None 
             o = by_uid[o].owner
         if t.cls == "ControlTerminal":
             return node_id.get(t.uid, str(t.uid))
+        if o in selector_of:
+            return f"{node_id[selector_of[o]]}.selector" + ("" if t.cls.startswith("Outer") else " (inside)")
         if o in tunnel_id:
             side = "outer" if t.cls.startswith("Outer") else "inner" if t.cls.startswith("Inner") else t.name or "term"
             if side == "inner" and kind_of.get(by_uid[o].owner) in _MULTI_FRAME:
                 # a case tunnel has one inner terminal per frame
                 inners = sorted(x.uid for x in rows if x.owner == o and x.cls.startswith("Inner"))
                 if len(inners) > 1:
-                    side += f"[frame {inners.index(t.uid)}]"
+                    # the frame is the diagram its wire is drawn on (terminal UIDs are not in frame
+                    # order once frames were added or moved)
+                    wd = container.get(by_uid[t.wire].owner, "") if t.wire in by_uid else ""
+                    sid, _, fr = wd.partition("#")
+                    if fr and sid == node_id.get(by_uid[o].owner):
+                        side += f"[frame {fr}]"
+                    else:
+                        side += f"[frame {inners.index(t.uid)}]"
             if sr_elem.get(o, 1) > 1:
                 side += f"[{sr_elem[o]}]"
             return f"{tunnel_id[o]}.{side}"

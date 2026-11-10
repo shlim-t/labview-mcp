@@ -428,7 +428,18 @@ class LabVIEW:
             if script.ref_wires:
                 self._connect_by_ref(target, script.ref_wires, out_refs, srs)
             if script.events:
-                self._build_events(target, script.events, dict(zip(script.outs, out_refs)), labels)
+                self._build_events(target, script.events, dict(zip(script.outs, out_refs)), labels,
+                                   out_refs, srs)
+            if script.use_default:
+                ud = self._helper(USEDEFAULT_VI)
+                owners = self._owners(target)
+                sel = self._all_of(target, "SelectorTunnel")
+                for k in script.use_default:  # Gen Script returned the tunnel's outer terminal
+                    tun = owners.get(self._uid_of(out_refs[k]))
+                    if tun not in sel:
+                        raise LabVIEWError("setting a case tunnel to Use Default if Unwired: tunnel not found")
+                    ud.SetControlValue("reference", sel[tun])
+                    self._run_checked(ud, "setting a case tunnel to Use Default if Unwired")
             rest = {k: v for k, v in (script.styles or {}).items() if k not in early}
             if rest:
                 self._apply_styles(target, rest)
@@ -647,6 +658,15 @@ class LabVIEW:
                 return str(c)
         return "Control"
 
+    def _owners(self, target) -> dict:
+        """{uid: owner uid} of every block-diagram object."""
+        h = self._helper(UIDS_VI)
+        h.SetControlValue("VI Refnum", target)
+        h.SetControlValue("Traverse Target", 1)
+        h.SetControlValue("Class Name", "GObject")
+        h.Run(False)
+        return dict(zip(h.GetControlValue("UIDs") or (), h.GetControlValue("Owner UIDs") or ()))
+
     def _all_of(self, target, cls: str) -> dict:
         """{uid: refnum} of the block-diagram objects of a class."""
         h = self._helper(UIDS_VI)
@@ -685,6 +705,79 @@ class LabVIEW:
                 found[(k, e)] = cur
         return found
 
+    def _tunnel_inner_by(self, target, tunnel, structure, rows):
+        """The inner terminal of a case tunnel (given by its outer terminal) on the frame that holds
+        `structure`."""
+        tu, su = self._uid_of(tunnel), self._uid_of(structure)
+        h = self._helper(UIDS_VI)
+        h.SetControlValue("VI Refnum", target)
+        h.SetControlValue("Traverse Target", 1)
+        h.SetControlValue("Class Name", "GObject")
+        h.Run(False)
+        owners = dict(zip(h.GetControlValue("UIDs") or (), h.GetControlValue("Owner UIDs") or ()))
+        owner = owners.get(su)
+        tu = owners.get(tu, tu)  # Gen Script returns a tunnel's outer terminal
+        diag = self._helper(TERMDIAG_VI)
+        for r in rows:
+            if r[1] == tu and r[3] == "InnerTerminal":
+                diag.SetControlValue("reference", r[4])
+                self._run_checked(diag, "reading a terminal's diagram")
+                if diag.GetControlValue("UID") == owner:
+                    return r[4]
+        raise LabVIEWError("wiring to a case tunnel from an event frame: its terminal was not found")
+
+    def _connect_through(self, target, es, j: int, i: int, a, z, outs: list, srs: dict) -> None:
+        """Wire a -> z through frame i of event structure j (reference es): from the inner terminal of
+        the input tunnel fed by a to the inner terminal of the output tunnel feeding z, in that frame."""
+        h = self._helper(UIDS_VI)
+        h.SetControlValue("VI Refnum", target)
+        h.SetControlValue("Traverse Target", 1)
+        h.SetControlValue("Class Name", "Terminal")
+        h.Run(False)
+        rows = list(zip(h.GetControlValue("UIDs") or (), h.GetControlValue("Owner UIDs") or (),
+                        h.GetControlValue("Names") or (), h.GetControlValue("Classes") or (),
+                        h.GetControlValue("References") or (), h.GetControlValue("Wire UIDs") or ()))
+        es_uid = self._uid_of(es)
+        h.SetControlValue("Class Name", "Tunnel")
+        h.Run(False)
+        tunnels = {u for u, o in zip(h.GetControlValue("UIDs") or (), h.GetControlValue("Owner UIDs") or ())
+                   if o == es_uid}
+        frame = self._event_frame_diagrams(target, uids=True)[j][i]
+        diag = self._helper(TERMDIAG_VI)
+
+        def wire_of(end):
+            if end[0] == "sr":
+                _, k, e, side = end
+                cls = "InnerTerminal" if side == "inner" else "OuterTerminal"
+                hit = [w for _, o, _, c, _, w in rows if o == srs.get((k, e)) and c == cls]
+            elif end[0] == "label":
+                hit = [w for _, _, n, c, _, w in rows if c == "ControlTerminal" and n == end[1]]
+            else:
+                uid = self._uid_of(outs[end[1]])
+                hit = [w for _, o, n, _, _, w in rows if o == uid and (n == end[2] or not end[2])]
+            if len(hit) != 1 or not hit[0]:
+                raise LabVIEWError("wiring through an event frame: an end is not wired to the event structure")
+            return hit[0]
+
+        def inner(end):
+            w = wire_of(end)
+            tun = [o for _, o, _, c, _, ww in rows if c == "OuterTerminal" and ww == w and o in tunnels]
+            if len(tun) != 1:
+                raise LabVIEWError("wiring through an event frame: no tunnel of the event structure carries "
+                                   "that value (wire it in another frame too)")
+            for _, o, _, c, r, _ in rows:
+                if o == tun[0] and c == "InnerTerminal":
+                    diag.SetControlValue("reference", r)
+                    self._run_checked(diag, "reading a terminal's diagram")
+                    if diag.GetControlValue("UID") == frame:
+                        return r
+            raise LabVIEWError("wiring through an event frame: the tunnel has no terminal in that frame")
+        src, dst = inner(a), inner(z)
+        c = self._helper(CONNECT_VI)
+        c.SetControlValue("reference", dst)
+        c.SetControlValue("other", src)
+        self._run_checked(c, f"wiring through frame {i} of an event structure")
+
     def _connect_by_ref(self, target, ref_wires: list, outs: list, srs: dict | None = None) -> None:
         """Draw wires between terminal references (Terminal.Connect Wire): for terminals whose names a
         script cannot use ("new element/subarray", "number: 0 to 1") and stacked shift registers."""
@@ -698,6 +791,8 @@ class LabVIEW:
                         h.GetControlValue("References") or ()))
 
         def term(end):
+            if end[0] == "tun":  # ("tun", k, j): tunnel k's inner terminal where structure j sits
+                return self._tunnel_inner_by(target, outs[end[1]], outs[end[2]], rows)
             if end[0] == "sr":  # ("sr", k, element, "inner" | "outer")
                 _, k, e, side = end
                 cls = "InnerTerminal" if side == "inner" else "OuterTerminal"
@@ -812,7 +907,7 @@ class LabVIEW:
                           h.GetControlValue("References") or ()))
         return [[(u if uids else r) for u, o, r in rows if o == ev] for ev in evs]
 
-    def _build_events(self, target, events: list, outs: dict, labels: dict) -> None:
+    def _build_events(self, target, events: list, outs: dict, labels: dict, out_list=(), srs=None) -> None:
         """Give each new event structure its frames: register the events, then generate each frame's
         code on the frame's own diagram."""
         from win32com.client import VARIANT
@@ -830,20 +925,18 @@ class LabVIEW:
                 # Frame 0 is the Timeout frame LabVIEW makes; registering an event replaces it.
                 reg.SetControlValue("reference", es)
                 reg.SetControlValue("Frame Index", i)
-                if fr["control"] is not None:
-                    reg.SetControlValue("Static App/VI Events", VARIANT(arr, []))
-                    # cluster order: Event Type, Reference, Limit (-1 = none), Lock Panel?
-                    reg.SetControlValue("Static Control Events", VARIANT(
-                        arr, [VARIANT(arr, [fr["event"], fp[fr["control"]], -1, False])]))
-                else:  # an event of this VI: Event Type, Limit, Lock Panel? (no reference)
-                    reg.SetControlValue("Static Control Events", VARIANT(arr, []))
-                    reg.SetControlValue("Static App/VI Events", VARIANT(
-                        arr, [VARIANT(arr, [fr["event"], -1, False])]))
+                every = [(fr["control"], fr["event"])] + list(fr.get("more", []))
+                # control events: Event Type, Reference, Limit (-1 = none), Lock Panel?; events of
+                # this VI: Event Type, Limit, Lock Panel? (no reference)
+                reg.SetControlValue("Static Control Events", VARIANT(
+                    arr, [VARIANT(arr, [e, fp[c], -1, False]) for c, e in every if c is not None]))
+                reg.SetControlValue("Static App/VI Events", VARIANT(
+                    arr, [VARIANT(arr, [e, -1, False]) for c, e in every if c is None]))
                 self._run_checked(reg, f"registering the event of frame {i} of {ev['name']!r}")
         _try(lambda: reg.SetControlValue("Static Control Events", VARIANT(arr, [])))
         _try(lambda: reg.SetControlValue("Static App/VI Events", VARIANT(arr, [])))
         for ev in events:
-            if ev.get("timeout") is not None:
+            if ev.get("timeout") is not None and ev["timeout"] >= 0:
                 self._set_timeout(outs[ev["name"]], ev["timeout"], ev["name"])
         n_frames = [len(ev["frames"]) for ev in events]
         if [len(d) for d in self._event_frame_diagrams(target)] != n_frames:
@@ -885,8 +978,38 @@ class LabVIEW:
                             f"LabVIEW rejected the code of event frame {i} of {ev['name']!r} (error {code})"
                             f"{': ' + hint if hint else ''}. {_strip_html(str(source))}")
                 if fr["script"] is not None:
-                    self._finish_nodes(target, fr["script"], list(self._gen_out), passes[-1][3], labels,
+                    frame_outs = list(self._gen_out)
+                    self._finish_nodes(target, fr["script"], frame_outs, passes[-1][3], labels,
                                        lambda s, refs, f=on_frame: f(s.xml, s.type_strings, s.data_strings, refs))
+                else:
+                    frame_outs = []
+                if fr.get("cross"):
+                    # wires from this frame to shift registers / nodes outside, between terminal
+                    # references: frame objects and event data nodes go after the main script's refs
+                    refs = list(out_list)
+                    ednodes = self._event_data_nodes(target, j, i) if any(
+                        e[0] == "evdata" for c in fr["cross"] for e in c) else {}
+
+                    def end(e):
+                        if e[0] == "fout":
+                            refs.append(frame_outs[e[1]])
+                            return ("out", len(refs) - 1, e[2])
+                        if e[0] == "evdata":
+                            role = fr["evdata"][e[1]]["role"]
+                            if role == "data":
+                                self._show_event_data(target, ednodes["data"], fr["evdata"][e[1]]["items"],
+                                                      f"{e[1]!r} ({fr['event_name']})")
+                            refs.append(ednodes[role][1])
+                            return ("out", len(refs) - 1, e[2])
+                        return e
+                    wires = [tuple(end(e) for e in c) for c in fr["cross"]]
+                    self._connect_by_ref(target, wires, refs, srs or {})
+        # values a frame passes on unchanged: join the inner terminals of the tunnels in that frame
+        # (the other frames' wires made the tunnels)
+        for j, ev in enumerate(events):
+            for i, fr in enumerate(ev["frames"]):
+                for a, z in fr.get("through") or []:
+                    self._connect_through(target, outs[ev["name"]], j, i, a, z, list(out_list), srs or {})
 
     def _event_data_nodes(self, target, j: int, i: int) -> dict:
         """The event data node ("data", an unbundler on the left of the frame) and, for filter events,
@@ -2082,10 +2205,43 @@ class LabVIEW:
             lab.SetControlValue("GObject", ref)
             lab.Run(False)
             labels[r.uid] = lab.GetControlValue("Object Label")
-        g = scan.build(rows, labels, _try(lambda: self._shift_register_sides(rows, cols[6])) or {})
+        g = scan.build(rows, labels, _try(lambda: self._shift_register_sides(rows, cols[6])) or {},
+                       _try(lambda: self._frame_order(rows, cols[6])) or {},
+                       _try(lambda: self._case_selectors(rows, cols[6])) or {})
+        if any(n["kind"] == "event_structure" for n in g["nodes"]):
+            sel = _try(lambda: self.event_selectors(target)) or []
+            evs = sorted((n for n in g["nodes"] if n["kind"] == "event_structure"), key=lambda n: n["uid"])
+            for n, caps in zip(evs, sel):
+                for fr, cap in zip(n.get("frames", []), caps):
+                    fr["events"] = parse_event_caption(cap)
         _try(lambda: self._scan_types(target, g, dict(zip((r.uid for r in rows), cols[6]))))
         _try(lambda: self._control_classes(target, g))
         return g
+
+    def _case_selectors(self, rows, refs) -> dict:
+        """{case structure UID: its selector's UID} for vi_dump's scan (the selector is a tunnel)."""
+        out, h = {}, None
+        for r, ref in zip(rows, refs):
+            if r.cls == "CaseStructure":
+                h = h or self._helper(CASESELECTOR_VI)
+                h.SetControlValue("reference", ref)
+                h.Run(False)
+                if not h.GetControlValue("error out")[0]:
+                    out[r.uid] = int(h.GetControlValue("UID"))
+        return out
+
+    def _frame_order(self, rows, refs) -> dict:
+        """{multi-frame structure UID: its frames' diagram UIDs in frame order} for vi_dump's scan."""
+        out, h = {}, None
+        for r, ref in zip(rows, refs):
+            if r.cls in ("CaseStructure", "EventStructure", "StackedSequence", "DisableStructure",
+                         "ConditionalDisableStructure", "TypeSpecializationStructure"):
+                h = h or self._helper(FRAMEDIAGS_VI)
+                h.SetControlValue("reference", ref)
+                h.Run(False)
+                if not h.GetControlValue("error out")[0]:
+                    out[r.uid] = [int(self._uid_of(d)) for d in h.GetControlValue("Diagrams[]") or ()]
+        return out
 
     def _shift_register_sides(self, rows, refs) -> dict:
         """{left shift register UID: (right side UID, top)} for vi_dump's scan reader."""
@@ -2271,6 +2427,31 @@ OUTCNT_VI = VIS_DIR / "lvmcp_outcnt.vi"
 UNBNAMES_VI = VIS_DIR / "lvmcp_unbnames.vi"
 CONNECT_VI = VIS_DIR / "lvmcp_connect.vi"
 SRADD_VI = VIS_DIR / "lvmcp_sradd.vi"
+TERMDIAG_VI = VIS_DIR / "lvmcp_termdiag.vi"
+FRAMEDIAGS_VI = VIS_DIR / "lvmcp_framediags.vi"
+CASESELECTOR_VI = VIS_DIR / "lvmcp_caseselector.vi"
+USEDEFAULT_VI = VIS_DIR / "lvmcp_usedefault.vi"
+
+
+def parse_event_caption(cap: str) -> list[dict]:
+    """An event frame's caption as LabVIEW shows it -> its events: '"a", "b": Value Change; Timeout'
+    -> [{"control": "a", "event": "Value Change"}, {"control": "b", ...}, {"event": "Timeout"}].
+    Dynamic and user events ('<Stop>: User Event') give {"dynamic": "Stop", "event": ...}."""
+    out = []
+    for part in re.findall(r'(?:"[^"]*"|<[^>]*>|[^;"<])+', cap):
+        part = part.strip()
+        if not part:
+            continue
+        m = re.match(r'((?:"[^"]*"\s*,\s*)*"[^"]*")\s*:\s*(.+)$', part)
+        if m:
+            out += [{"control": c, "event": m.group(2).strip()} for c in re.findall(r'"([^"]*)"', m.group(1))]
+            continue
+        m = re.match(r"<([^>]*)>\s*:\s*(.+)$", part)
+        if m:
+            out.append({"dynamic": m.group(1), "event": m.group(2).strip()})
+        else:
+            out.append({"event": part})
+    return out
 
 
 def _end_text(end) -> str:

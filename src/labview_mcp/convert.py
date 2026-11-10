@@ -22,7 +22,9 @@ CONTROL_STYLES = {"Slide": "Vertical Fill Slide", "XYGraph": "XY Graph", "Ring":
                   "WaveformChart": "Waveform Chart", "ComboBox": "Combo Box", "Table": "Table",
                   "ListBox": "Listbox", "MulticolumnListbox": "Multicolumn Listbox", "Knob": "Knob",
                   "Scrollbar": "Vertical Scrollbar", "TabControl": "Tab Control", "TreeControl": "Tree"}
-_STRUCT = {"for_loop": "for_loop", "while_loop": "while_loop", "case": "case"}
+_STRUCT = {"for_loop": "for_loop", "while_loop": "while_loop", "case": "case", "event_structure": "event"}
+# an event frame's own nodes: they become the frame's "data" / "filter" entries
+_EVENT_NODES = {"Event Data Node": "data", "Event Filter Node": "filter"}
 
 
 class _Unsupported(Exception):
@@ -103,6 +105,7 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
     contents: dict[str, dict] = collections.defaultdict(lambda: collections.defaultdict(list))
     tunnels, srs = {}, {}
     controls, indicators = [], []
+    ev_nodes: dict[str, dict] = collections.defaultdict(dict)  # event frame -> {"data": id, "filter": id}
     for n in g["nodes"]:
         k, nid, where = n["kind"], n["id"], n.get("in", "")
         try:
@@ -124,6 +127,8 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
                 if not (isinstance(t, dict) and "flat" in t):
                     c["value"] = n["value"]
                 contents[where]["constants"].append(c)
+            elif k == "function" and n.get("function") in _EVENT_NODES and "#" in where:
+                ev_nodes[where][_EVENT_NODES[n["function"]]] = nid
             elif k == "function":
                 fn = FUNCTION_ALIASES.get(n.get("function"), n.get("function"))
                 if catalog is not None and fn not in catalog:
@@ -140,7 +145,7 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
                 st = {"name": nid, "type": _STRUCT[k]}
                 if k == "while_loop" and n.get("condition") == "ContinueIfTrue":
                     st["stop_if_true"] = False
-                if k == "case":
+                if k in ("case", "event_structure"):
                     st["_frames"] = n.get("frames", [])
                 contents[where]["structures"].append(st)
             elif k in ("property_node", "invoke_node"):
@@ -194,12 +199,33 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
             return "input"
         return "output"
 
-    case_out = {}
-    for tid, t in tunnels.items():
+    case_out, timeouts = {}, {}
+    const_value = {n["id"]: n.get("value") for n in g["nodes"] if n["kind"] == "constant"}
+    for n in g["nodes"]:  # an integer constant the scan saw only as flattened data
+        if n["kind"] == "constant" and n.get("value") is None and n.get("type") in ("i8", "i16", "i32", "i64") \
+                and (n.get("flat") or {}).get("data"):
+            const_value[n["id"]] = int.from_bytes(bytes.fromhex(n["flat"]["data"]), "big", signed=True)
+    for tid, t in list(tunnels.items()):
         st = nodes.get(t.get("structure"), {})
+        if st.get("kind") == "event_structure" and t.get("class") == "Tunnel":
+            src = [a for a, b in edges if b == f"{tid}.outer"]
+            for _ in range(5):  # the constant may sit outside the loop holding the event structure
+                if len(src) == 1 and src[0].endswith(".inner") and src[0][:-6] in tunnels:
+                    src = [a for a, b in edges if b == f"{src[0][:-6]}.outer"]
+            if src and len(src) == 1 and src[0] in const_value and isinstance(const_value[src[0]], int):
+                timeouts[st["id"]] = const_value[src[0]]
+                edges = [(a, b) for a, b in edges if b != f"{tid}.outer"]
+                for d in contents.values():  # its constant is made again from the terminal
+                    d["constants"] = [c for c in d.get("constants", []) if c["name"] != src[0]]
+            elif src:
+                bad("event structure: timeout from something other than a numeric constant")
+            if any(a.startswith(f"{tid}.inner") or b.startswith(f"{tid}.inner") for a, b in edges):
+                bad("event structure: dynamic event terminal")
+            del tunnels[tid]
+            continue
         if st.get("kind") == "case" and direction(tid, t) == "output":
             case_out[tid] = f"t_{tid}"
-        elif st.get("kind") not in ("for_loop", "while_loop", "case"):
+        elif st.get("kind") not in ("for_loop", "while_loop", "case", "event_structure"):
             bad(f"tunnel of a {st.get('kind')}")
         if t.get("mode") and t["mode"] not in ("AutoIndexed", "LastValue", "Indexing", "Normal", ""):
             features.add(f"tunnel mode {t['mode']}")
@@ -209,22 +235,60 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
     def side(tid, t):  # (entry end, exit end) of a tunnel
         return (f"{tid}.outer", f"{tid}.inner") if direction(tid, t) == "input" else (f"{tid}.inner", f"{tid}.outer")
 
-    for _ in range(20):  # collapse tunnels (nested structures chain them)
+    # a value an event frame passes on unchanged (input tunnel -> output tunnel inside one frame)
+    # becomes that frame's "wires" entry, between what feeds the one and what the other feeds
+    ev_tun = {tid for tid, t in tunnels.items() if nodes.get(t.get("structure"), {}).get("kind") == "event_structure"}
+    tun_frame = re.compile(r"([^.]+)\.inner\[frame (\d+)\]$")
+    passes = []
+    for a, b in edges:
+        ma, mb = tun_frame.match(a), tun_frame.match(b)
+        if ma and mb and ma.group(1) in ev_tun and mb.group(1) in ev_tun and ma.group(2) == mb.group(2):
+            passes.append((ma.group(1), mb.group(1), tunnels[ma.group(1)]["structure"], int(ma.group(2))))
+    edges = [(a, b) for a, b in edges if not any(a == f"{p[0]}.inner[frame {p[3]}]"
+                                                 and b == f"{p[1]}.inner[frame {p[3]}]" for p in passes)]
+    through = collections.defaultdict(list)  # (event structure, frame) -> [[from, to]]
+    for stage in ("other tunnels", "event tunnels"):
+      for _ in range(20):  # collapse tunnels (nested structures chain them)
         changed = False
         for tid, t in tunnels.items():
-            if tid in case_out:
+            if tid in case_out or (stage == "other tunnels" and tid in ev_tun):
                 continue
             entry, exit_ = side(tid, t)
-            ins = [a for a, b in edges if b == entry]
+            # an output tunnel of a multi-frame structure has one inner end per frame
+            ins = [a for a, b in edges if b == entry or b.startswith(entry + "[")]
             # a case's input tunnel has one inner end per frame: "tunnel_3.inner[frame 1]"
             outs = [b for a, b in edges if a == exit_ or a.startswith(exit_ + "[")]
             if ins or outs:
-                edges = [(a, b) for a, b in edges if b != entry and a != exit_
-                         and not a.startswith(exit_ + "[")]
+                edges = [(a, b) for a, b in edges if b != entry and not b.startswith(entry + "[")
+                         and a != exit_ and not a.startswith(exit_ + "[")]
                 edges += [(a, b) for a in ins for b in outs]
                 changed = True
         if not changed:
             break
+      if stage == "other tunnels":
+        for ta, tb, es, k in passes:
+            srcs = [a for a, b in edges if b == f"{ta}.outer"]
+            sinks = [b for a, b in edges if a == f"{tb}.outer"]
+            if len(srcs) != 1 or not sinks:
+                bad("event structure: a value passed through a frame from or to nothing")
+                continue
+            try:
+                for z in sinks:
+                    through[(es, k)].append([_map_end(srcs[0], nodes, sr_name, case_out, "source"),
+                                             _map_end(z, nodes, sr_name, case_out, "sink")])
+            except _Unsupported as e:
+                bad(str(e))
+    # a case selector's value inside the frames ("<case>.selector (inside)", e.g. an error cluster
+    # passed on): wire what feeds the selector into the frame instead (LabVIEW adds a tunnel)
+    sel_src = {b: a for a, b in edges if b.endswith(".selector")}
+    inside = [(a, b) for a, b in edges if a.endswith(".selector (inside)")]
+    edges = [(a, b) for a, b in edges if not a.endswith(".selector (inside)")]
+    for a, b in inside:
+        src = sel_src.get(a[:-len(" (inside)")])
+        if src is None:
+            bad("case: selector value used inside, selector unwired")
+        else:
+            edges.append((src, b))
     wires = []
     for a, b in edges:
         try:
@@ -266,6 +330,11 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
                 f["size"] = sizes[f["name"]]
                 features.add("growable node")
 
+    # front-panel labels -> terminal names, for the controls event frames name (labels must be unique)
+    label_count = collections.Counter(c.get("label") for c in controls + indicators)
+    label_id = {c["label"]: c["name"] for c in controls + indicators
+                if c.get("label") and label_count[c["label"]] == 1}
+
     # -- assemble the nesting
     def fill(container: str) -> dict:
         d = {k: list(v) for k, v in contents.get(container, {}).items() if k != "structures"}
@@ -291,6 +360,15 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
                                and nodes.get(n[2:], {}).get("structure") == st["name"]})
                 if outs:
                     st["output_tunnels"] = outs
+            elif st["type"] == "event":
+                st["events"] = [_event_frame(fr, st["name"], fill(f"{st['name']}#{fr['index']}"),
+                                             ev_nodes.get(f"{st['name']}#{fr['index']}", {}),
+                                             timeouts.get(st["name"]), label_id, bad)
+                                for fr in st.pop("_frames")]
+                for k, entry in enumerate(st["events"]):
+                    if through.get((st["name"], k)):
+                        entry["wires"] = through[(st["name"], k)]
+                features.add("event structure")
             else:
                 st.update(fill(st["name"]))
                 names = sorted({v for k, v in sr_name.items() if srs[k]["structure"] == st["name"]})
@@ -363,6 +441,44 @@ def _map_end(e: str, nodes, sr_name, case_out, role: str) -> str:
     if n["kind"] == "function" and term == "element" and fn in gen._GROWABLE_FUNCS and fn != "Index Array":
         term = "element[1]"  # the scan reader numbers "element" only when there are several
     return f"{node}.{term}" if term else node
+
+
+def _event_frame(fr: dict, es: str, entry: dict, own: dict, timeout, label_id: dict, bad) -> dict:
+    """A dumped event frame (its events read from LabVIEW's caption) as a vi_create events entry."""
+    from .gen import CONTROL_EVENTS, VI_EVENTS
+    evs = []
+    for e in fr.get("events") or []:
+        if e.get("dynamic") is not None:
+            bad(f"event: dynamic or user event ({e['event']})")
+        elif e.get("control") is not None:
+            if e["control"] not in label_id:
+                bad("event: of an object that is not a control with a unique label")
+            elif e["event"] not in CONTROL_EVENTS:
+                bad(f"event: {e['event']}")
+            else:
+                evs.append({"control": label_id[e["control"]], "event": e["event"]})
+        elif e["event"] not in VI_EVENTS:
+            bad(f"event: {e['event']}")
+        else:
+            evs.append({"event": e["event"]})
+    if not fr.get("events"):
+        bad("event structure: frame events unknown")
+    if not evs:
+        return entry
+    tmo = [e for e in evs if e["event"] == "Timeout"]
+    filt = [e for e in evs if e["event"].endswith("?")]  # a filter node belongs to a filter event
+    first = tmo[0] if tmo else filt[0] if filt and "filter" in own else evs[0]
+    entry.update(first)
+    more = [e for e in evs if e is not first]
+    if tmo and more:
+        bad("event structure: Timeout together with other events in one frame")
+    elif more:
+        entry["more"] = more
+    if tmo:
+        entry["timeout"] = timeout if timeout is not None else -1
+    for role, nid in own.items():
+        entry[role] = nid
+    return entry
 
 
 def _frame_value(fr: dict, case: str, wires, nodes):
