@@ -51,7 +51,9 @@ def _is_terminal(cls: str) -> bool:
     return cls.endswith("Terminal") and cls != "ControlTerminal"
 
 
-def build(rows: list[Row], labels: dict[int, str]) -> dict:
+def build(rows: list[Row], labels: dict[int, str], shift_registers: dict | None = None) -> dict:
+    """shift_registers: {left shift register UID: (its right side's UID, its top)}, to pair the two
+    sides and to order the elements of a stacked shift register (top first)."""
     by_uid: dict[int, Row] = {}
     for r in rows:
         by_uid.setdefault(r.uid, r)
@@ -136,9 +138,24 @@ def build(rows: list[Row], labels: dict[int, str]) -> dict:
             n["in"] = w
         nodes.append(n)
 
+    # shift registers: one left node per right side; the lower elements of a stacked one are
+    # LeftShiftRegisters of their own, named here as element k of the top one ("inner[2]")
+    sr = shift_registers or {}
+    stack: dict[int, list[int]] = collections.defaultdict(list)  # right uid -> left uids, top first
+    for u, (right, top) in sorted(sr.items(), key=lambda x: x[1][1]):
+        if u in by_uid and right in by_uid:
+            stack[right].append(u)
+    sr_elem: dict[int, int] = {}  # left uid -> element number (1 = top)
+    sr_top: dict[int, int] = {}   # left uid -> the top element's uid
+    for right, lefts in stack.items():
+        for k, u in enumerate(lefts):
+            sr_elem[u], sr_top[u] = k + 1, lefts[0]
+
     # tunnels and shift registers: name their terminals after the tunnel object
     tunnel_id: dict[int, str] = {}
     for r in rows:
+        if r.uid in sr_top or r.uid in stack:
+            continue
         if r.cls.endswith("Tunnel") or "ShiftRegister" in r.cls:
             tunnel_id[r.uid] = f"{'tunnel' if 'Tunnel' in r.cls else 'shift_register'}_{r.uid}"
             n = {"id": tunnel_id[r.uid], "uid": r.uid, "kind": "tunnel" if "Tunnel" in r.cls else "shift_register",
@@ -147,6 +164,22 @@ def build(rows: list[Row], labels: dict[int, str]) -> dict:
             if w:
                 n["in"] = w
             nodes.append(n)
+    for right, lefts in stack.items():
+        r = by_uid[lefts[0]]
+        left_id = f"shift_register_{lefts[0]}"
+        for u in lefts:
+            tunnel_id[u] = left_id
+        tunnel_id[right] = f"shift_register_{right}"
+        base = {"structure": node_id.get(r.owner, "")}
+        w = where(r.owner)
+        if w:
+            base["in"] = w
+        n = {"id": left_id, "uid": lefts[0], "kind": "shift_register_left", "class": r.cls, **base}
+        if len(lefts) > 1:
+            n["elements"] = len(lefts)
+        nodes.append(n)
+        nodes.append({"id": tunnel_id[right], "uid": right, "kind": "shift_register_right",
+                      "class": by_uid[right].cls, "pair": left_id, **base})
 
     dup: dict = collections.defaultdict(list)  # (owner, name, is source) -> terminal uids in diagram order
     elem: dict[int, str] = {}  # Bundle / Unbundle terminals named after cluster elements -> "element[k]"
@@ -172,6 +205,8 @@ def build(rows: list[Row], labels: dict[int, str]) -> dict:
                 inners = sorted(x.uid for x in rows if x.owner == o and x.cls.startswith("Inner"))
                 if len(inners) > 1:
                     side += f"[frame {inners.index(t.uid)}]"
+            if sr_elem.get(o, 1) > 1:
+                side += f"[{sr_elem[o]}]"
             return f"{tunnel_id[o]}.{side}"
         if o in node_id:
             nid = node_id[o]

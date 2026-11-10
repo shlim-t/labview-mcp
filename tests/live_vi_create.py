@@ -276,6 +276,20 @@ CASES = {
         "wires": [["k", "r.array"], ["i", "r.index"], ["x", "r.new element/subarray"], ["r.output array", "o"],
                   ["k", "f.array"], ["i", "f.index"], ["f.array w/ subset deleted", "d"]],
     }, {}, {"replaced": [1.0, 9.0, 3.0], "rest": [1.0, 3.0]}),
+    # stacked shift register (left[2] = two iterations back): Fibonacci, plus a Property Node
+    # wired straight to a shift register
+    "stacked_sr": ({
+        "controls": [{"name": "n", "type": "i32", "default": 10}, {"name": "x", "type": "dbl", "default": 2.5}],
+        "indicators": [{"name": "fib", "type": "i32"}, {"name": "v", "type": "dbl", "label": "value"}],
+        "constants": [{"name": "zero", "type": "i32", "value": 0}, {"name": "one", "type": "i32", "value": 1},
+                      {"name": "z", "type": "dbl", "value": 0}],
+        "structures": [{"name": "L", "type": "for_loop", "shift_registers": ["s", "p"],
+                        "functions": [{"name": "a", "function": "Add"}],
+                        "property_nodes": [{"name": "pn", "control": "x", "properties": ["Value"]}]}],
+        "wires": [["n", "L.N"], ["one", "s.left"], ["zero", "s.left[2]"], ["s.left", "a.x"],
+                  ["s.left[2]", "a.y"], ["a.x+y", "s.right"], ["s.right", "fib"],
+                  ["z", "p.left"], ["pn.Value", "p.right"], ["p.right", "v"]],
+    }, {}, {"fib": 89, "value": 2.5}),
     # Unbundle By Name / Bundle By Name: elements chosen by name, in any order
     "by_name": ({
         "controls": [{"name": "c", "type": {"cluster": [{"name": "alpha", "type": "dbl"},

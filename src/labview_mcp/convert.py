@@ -344,7 +344,8 @@ def _map_end(e: str, nodes, sr_name, case_out, role: str) -> str:
         return case_out[node]
     if node in sr_name:
         left = nodes[node]["kind"] == "shift_register_left"
-        return f"{sr_name[node]}.{'left' if left else 'right'}"
+        m = re.search(r"\[(\d+)\]$", term)  # element k of a stacked shift register
+        return f"{sr_name[node]}." + (f"left[{m.group(1)}]" if left and m else "left" if left else "right")
     n = nodes.get(node)
     if n is None:
         raise _Unsupported("wire: unknown end")
@@ -429,7 +430,7 @@ def signature(g: dict) -> dict:
         kinds[k] += 1
     tun = {n["id"] for n in g["nodes"] if n["kind"] == "tunnel"}
     conn = sum(1 for w in g["wires"] for s in w["to"]
-               if w["from"].partition(".")[0] not in tun and s.partition(".")[0] not in tun)
+               if (w["from"] or "").partition(".")[0] not in tun and s.partition(".")[0] not in tun)
     return {"nodes": kinds, "connections": conn}
 
 

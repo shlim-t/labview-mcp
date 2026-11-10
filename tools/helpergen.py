@@ -349,7 +349,7 @@ HELPERS["lvmcp_termctl"] = {
 }
 # Terminal.Connect Wire: a wire between two terminals given by reference (terminals whose names a
 # script cannot use: "new element/subarray", "number: 0 to 1", unnamed ones)
-HELPERS["lvmcp_connect"] = {
+HELPERS["lvmcp_connect", "lvmcp_srright", "lvmcp_sradd"] = {
     "controls": [("reference", "ref:Terminal"), ("other", "ref:Terminal")],
     "indicators": [("error out", "error")],
     "nodes": [{"name": "k", "kind": "invoke", "class": "Terminal", "method": "Connect Wire"}],
@@ -526,6 +526,25 @@ HELPERS["lvmcp_itemterm"] = {
               {"name": "u", "kind": "property", "class": "GObject", "items": ["UID"]}],
     "wires": [("reference", "p.reference"), ("p.Terminal", "u.reference"), ("p.error out", "u.error in (no error)"),
               ("u.UID", "UID"), ("u.error out", "error out")],
+}
+
+# LeftShiftRegister.Right Shift Register -> UID, and its top: pair the two sides of a shift register and
+# order the elements of a stacked one (vi_dump scan)
+HELPERS["lvmcp_srright"] = {
+    "controls": [("reference", "ref:LeftShiftRegister")],
+    "indicators": [("UID", "i32"), ("top", "i32"), ("error out", "error")],
+    "nodes": [{"name": "p", "kind": "property", "class": "LeftShiftRegister", "items": ["RightReg", "Top"]},
+              {"name": "u", "kind": "property", "class": "GObject", "items": ["UID"]}],
+    "wires": [("reference", "p.reference"), ("p.RightReg", "u.reference"), ("p.error out", "u.error in (no error)"),
+              ("p.Top", "top"), ("u.UID", "UID"), ("u.error out", "error out")],
+}
+
+# LeftShiftRegister.Add Element: one more element on the left side (a stacked shift register)
+HELPERS["lvmcp_sradd"] = {
+    "controls": [("reference", "ref:LeftShiftRegister")],
+    "indicators": [("error out", "error")],
+    "nodes": [{"name": "a", "kind": "invoke", "class": "LeftShiftRegister", "method": "Add Element"}],
+    "wires": [("reference", "a.reference"), ("a.error out", "error out")],
 }
 
 ORDER = ["lvmcp_move", "lvmcp_propwrite", "lvmcp_proplink", "lvmcp_invokelink", "lvmcp_uid", "lvmcp_classname",

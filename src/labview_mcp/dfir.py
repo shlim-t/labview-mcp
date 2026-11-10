@@ -422,9 +422,16 @@ def parse(text: str, catalog: dict[str, list[str]] | None = None, subvi_terms=No
                     order.append(ref)
                 elif meth == "CreateShiftRegister":
                     tt = _TDR.findall(args)
-                    border.setdefault(owner, []).append(ref)
+                    # a stacked shift register is one left node with N elements: its terminals are the
+                    # N outer (initial value) ones, then the N inner ones; the loop has one per element
+                    cm = re.search(r"\),\s*(\d+)\s*$", args)
+                    count = int(cm.group(1)) if cm else 1
+                    for k in range(count):
+                        border.setdefault(owner, []).append(ref if k == 0 else f"{ref}#{k + 1}")
                     nodes[ref] = {"id": _short(ref), "kind": "shift_register_left", "_owner": owner, **base,
                                   "type": type_of(*tt[0]) if tt else "?"}
+                    if count > 1:
+                        nodes[ref]["elements"] = count
                     order.append(ref)
                 elif meth == "GetRightShiftRegister":
                     left = nodes.get(owner, {})
@@ -491,12 +498,17 @@ def parse(text: str, catalog: dict[str, list[str]] | None = None, subvi_terms=No
             b = border.get(ref, [])
             j = t - (1 if lead else 0)
             if 0 <= j < len(b):
-                return f"{nodes[b[j]]['id']}.outer"
+                r, _, k = b[j].partition("#")
+                return f"{nodes[r]['id']}.outer" + (f"[{k}]" if k else "")
         if k == "tunnel":
             if t == 0:
                 return f"{n['id']}.outer"
             frames = len(structures.get(_ref_of(n["structure"]), {}).get("frames", []))
             return f"{n['id']}.inner" + (f"[frame {t - 1}]" if frames > 1 else "")
+        if k == "shift_register_left" and n.get("elements", 1) > 1:
+            e = n["elements"]  # element 1 is "outer" / "inner", element k "outer[k]" / "inner[k]"
+            side, j = ("outer", t + 1) if t < e else ("inner", t - e + 1)
+            return f"{n['id']}.{side}" + (f"[{j}]" if j > 1 else "")
         if k in ("shift_register_left", "shift_register_right"):
             return f"{n['id']}." + ("outer" if t == 0 else "inner")
         if k == "subvi" and subvi_terms and n.get("path"):

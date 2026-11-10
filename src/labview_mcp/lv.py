@@ -424,8 +424,9 @@ class LabVIEW:
             self._finish_nodes(target, script, out_refs, [], labels,
                                lambda s, refs: self._gen_script(target, s.xml, s.type_strings, s.data_strings,
                                                                 refs=refs, raw=True))
+            srs = self._stack_shift_registers(target, script.stacks, out_refs) if script.stacks else {}
             if script.ref_wires:
-                self._connect_by_ref(target, script.ref_wires, out_refs)
+                self._connect_by_ref(target, script.ref_wires, out_refs, srs)
             if script.events:
                 self._build_events(target, script.events, dict(zip(script.outs, out_refs)), labels)
             rest = {k: v for k, v in (script.styles or {}).items() if k not in early}
@@ -646,9 +647,47 @@ class LabVIEW:
                 return str(c)
         return "Control"
 
-    def _connect_by_ref(self, target, ref_wires: list, outs: list) -> None:
+    def _all_of(self, target, cls: str) -> dict:
+        """{uid: refnum} of the block-diagram objects of a class."""
+        h = self._helper(UIDS_VI)
+        h.SetControlValue("VI Refnum", target)
+        h.SetControlValue("Traverse Target", 1)
+        h.SetControlValue("Class Name", cls)
+        h.Run(False)
+        return dict(zip(h.GetControlValue("UIDs") or (), h.GetControlValue("References") or ()))
+
+    def _stack_shift_registers(self, target, stacks: list, outs: list) -> dict:
+        """Add the left elements of stacked shift registers (LeftShiftRegister.Add Element; each one is
+        a LeftShiftRegister of its own). Returns {(k, element): uid}, element 0 = the right side."""
+        add, right = self._helper(SRADD_VI), self._helper(SRRIGHT_VI)
+        found = {}
+        for k, n in stacks:
+            lefts = self._all_of(target, "LeftShiftRegister")
+            rid = self._uid_of(outs[k])  # Gen Script returns the right side
+            cur = None
+            for uid, ref in lefts.items():
+                right.SetControlValue("reference", ref)
+                self._run_checked(right, "reading a shift register's right side")
+                if right.GetControlValue("UID") == rid:
+                    cur = uid
+                    break
+            if cur is None:
+                raise LabVIEWError("stacking a shift register: its left side was not found")
+            found[(k, 0)], found[(k, 1)] = rid, cur
+            for e in range(2, n + 1):
+                add.SetControlValue("reference", lefts[cur])
+                self._run_checked(add, "adding a shift register element")
+                now = self._all_of(target, "LeftShiftRegister")
+                new = set(now) - set(lefts)
+                if len(new) != 1:
+                    raise LabVIEWError("stacking a shift register: the new element was not found")
+                lefts, cur = now, new.pop()
+                found[(k, e)] = cur
+        return found
+
+    def _connect_by_ref(self, target, ref_wires: list, outs: list, srs: dict | None = None) -> None:
         """Draw wires between terminal references (Terminal.Connect Wire): for terminals whose names a
-        script cannot use ("new element/subarray", "number: 0 to 1")."""
+        script cannot use ("new element/subarray", "number: 0 to 1") and stacked shift registers."""
         h = self._helper(UIDS_VI)
         h.SetControlValue("VI Refnum", target)
         h.SetControlValue("Traverse Target", 1)
@@ -659,6 +698,13 @@ class LabVIEW:
                         h.GetControlValue("References") or ()))
 
         def term(end):
+            if end[0] == "sr":  # ("sr", k, element, "inner" | "outer")
+                _, k, e, side = end
+                cls = "InnerTerminal" if side == "inner" else "OuterTerminal"
+                hits = [r for _, o, _, c, r in rows if o == (srs or {}).get((k, e)) and c == cls]
+                if len(hits) != 1:
+                    raise LabVIEWError(f"wiring a stacked shift register: cannot find element {e}'s {side} terminal")
+                return hits[0]
             kind, k, name = end
             if kind == "label":  # a front-panel object's block-diagram terminal
                 hits = [r for _, _, n, c, r in rows if c == "ControlTerminal" and n == k]
@@ -679,7 +725,7 @@ class LabVIEW:
         for a, z in ref_wires:
             c.SetControlValue("reference", term(z))
             c.SetControlValue("other", term(a))
-            self._run_checked(c, f"wiring {a[2] or a[1]!r} to {z[2] or z[1]!r}")
+            self._run_checked(c, f"wiring {_end_text(a)} to {_end_text(z)}")
 
     def _owned(self, target, cls: str, owner: int, names: bool = False) -> list:
         """(uid, refnum) — or (uid, name) — of the objects of a class whose owner has UID `owner`."""
@@ -2036,10 +2082,22 @@ class LabVIEW:
             lab.SetControlValue("GObject", ref)
             lab.Run(False)
             labels[r.uid] = lab.GetControlValue("Object Label")
-        g = scan.build(rows, labels)
+        g = scan.build(rows, labels, _try(lambda: self._shift_register_sides(rows, cols[6])) or {})
         _try(lambda: self._scan_types(target, g, dict(zip((r.uid for r in rows), cols[6]))))
         _try(lambda: self._control_classes(target, g))
         return g
+
+    def _shift_register_sides(self, rows, refs) -> dict:
+        """{left shift register UID: (right side UID, top)} for vi_dump's scan reader."""
+        out, h = {}, None
+        for r, ref in zip(rows, refs):
+            if r.cls == "LeftShiftRegister":
+                h = h or self._helper(SRRIGHT_VI)
+                h.SetControlValue("reference", ref)
+                h.Run(False)
+                if not h.GetControlValue("error out")[0]:
+                    out[r.uid] = (int(h.GetControlValue("UID")), int(h.GetControlValue("top")))
+        return out
 
     def _scan_types(self, target, g: dict, refs: dict) -> None:
         """Data types of constants and front-panel terminals, from their values' flattened type."""
@@ -2212,6 +2270,17 @@ TERMCONST_VI = VIS_DIR / "lvmcp_termconst.vi"
 OUTCNT_VI = VIS_DIR / "lvmcp_outcnt.vi"
 UNBNAMES_VI = VIS_DIR / "lvmcp_unbnames.vi"
 CONNECT_VI = VIS_DIR / "lvmcp_connect.vi"
+SRADD_VI = VIS_DIR / "lvmcp_sradd.vi"
+
+
+def _end_text(end) -> str:
+    """A ref_wires end for messages."""
+    if end[0] == "sr":
+        return f"shift register element {end[2]} ({end[3]})"
+    return repr(end[2] or end[1])
+
+
+SRRIGHT_VI = VIS_DIR / "lvmcp_srright.vi"
 BUNNAMES_VI = VIS_DIR / "lvmcp_bunnames.vi"
 CONSTTYPE_VI = VIS_DIR / "lvmcp_consttype.vi"
 CTLTYPE_VI = VIS_DIR / "lvmcp_ctltype.vi"

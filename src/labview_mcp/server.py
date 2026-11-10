@@ -189,7 +189,9 @@ async def vi_create(
     Structures (top level or nested, in "structures"; they hold constants/functions/subvis/
     structures of their own; all names are global and wires are always listed at the top level):
       {"name": "L", "type": "for_loop", "functions": [...], "shift_registers": ["acc"]}
-          terminals L.N (count), L.i; shift register: acc.left (previous value), acc.right (next)
+          terminals L.N (count), L.i; shift register: acc.left (previous value), acc.right (next);
+          acc.left[2], acc.left[3], ... stack it (values 2, 3, ... iterations back; wire each an
+          initial value from outside like acc.left)
       {"name": "W", "type": "while_loop", "stop_if_true": true, ...}   terminals W.i, W.stop
       {"name": "C", "type": "case", "output_tunnels": ["t"], "cases": [
           {"value": true, ...contents}, {"value": 3}, {"value": "apple"}, {"default": true}]}

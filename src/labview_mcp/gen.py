@@ -318,7 +318,8 @@ PAD_X, PAD_TOP, PAD_BOTTOM, GAP_X, GAP_Y = 50, 40, 50, 50, 30
 
 STRUCTURE_HELP = (
     "structures: {\"name\": \"L\", \"type\": \"for_loop\" | \"while_loop\" | \"case\", ...contents}. "
-    "Loops hold constants/functions/subvis/structures and optional \"shift_registers\": [\"sr\"]; "
+    "Loops hold constants/functions/subvis/structures and optional \"shift_registers\": [\"sr\"] "
+    "(wired sr.left, sr.right; sr.left[2], sr.left[3]... stack it: values 2, 3... iterations back); "
     "while loops take \"stop_if_true\" (default true). A case holds \"cases\": [{\"value\": true | 3 | "
     "\"apple\", \"default\": false, ...contents}] and optional \"output_tunnels\": [\"t\"]. An event "
     "structure holds \"events\": [{\"control\": \"stop\", \"event\": \"Value Change\", ...contents}], one "
@@ -387,10 +388,13 @@ class Script:
     late_refs: list = None
     # wires to terminals a script cannot name ("new element/subarray", "number: 0 to 1"), drawn last
     # between terminal references: [(end, end)], end = ("out", k, terminal) | ("label", label, "")
+    # | ("sr", k, element, side): shift register k, element 1.. of its left side (0 = right side)
     ref_wires: list = None
+    # stacked shift registers: [(k, elements)], k = index into outs
+    stacks: list = None
 
     def has_nodes(self) -> bool:
-        return bool(self.pnodes) or bool(self.ref_wires) or any(fr["script"] is not None and fr["script"].has_nodes()
+        return bool(self.pnodes) or bool(self.ref_wires) or bool(self.stacks) or any(fr["script"] is not None and fr["script"].has_nodes()
                                         for ev in self.events or [] for fr in ev["frames"])
 
 
@@ -415,6 +419,7 @@ class _Builder:
         self.children: dict[str, list[str]] = {"": []}  # container id -> node names, spec order
         self.types: list[tuple[bytes, bytes]] = []
         self.out_index: dict[str, int] = {}  # new objects whose references the script returns
+        self.sr_stack: dict[str, int] = {}  # stacked shift register -> number of left elements
         self.event_order: list[str] = []     # event structures in emit (= creation) order
         self.extra_wires: list = []           # wires the builder adds itself (case "pass")
 
@@ -633,10 +638,11 @@ class _Builder:
                                 "in or out, wire the inner node directly; LabVIEW adds the tunnel")
             return f"{node}.{lv}"
         if k == "shiftreg":
-            side = {"left": "Left", "right": "Right"}.get(term.lower())
+            side = {"left": "Left", "right": "Right", "left[1]": "Left"}.get(term.lower())
             if not side:
                 raise SpecError(f"wire end {end!r}: wire shift registers as \"{node}.left\" (the value "
-                                f"from the previous iteration) or \"{node}.right\" (the value for the next)")
+                                f"from the previous iteration), \"{node}.left[2]\" (the one before, a stacked "
+                                f"shift register; [3], ... further back) or \"{node}.right\" (the value for the next)")
             return f"{node}.{side}"
         if term:
             raise SpecError(f"wire end {end!r}: {k}s have one terminal, use just \"{node}\"")
@@ -741,13 +747,23 @@ class _Builder:
                 self.emit(n.name, pos, wires, out)
                 for k, sr in enumerate(m for m in self.nodes.values() if m.owner == n.name and m.kind == "shiftreg"):
                     out.append(f"<ShiftRegister name={quoteattr(sr.name)} location=\"left\" "
-                               f"offset=\"{PAD_TOP + 30 * k}\"></ShiftRegister>")
+                               f"offset=\"{self.sr_offset(sr)}\"{self.out_attr(sr.name)}></ShiftRegister>")
             elif n.kind == "case":
                 for i in n.spec.get("_frames", []):
                     out.append(f"<Frame name={quoteattr(f'{n.name}_frame{i}')} index=\"{i}\">")
                     self.emit(f"{n.name}#{i}", pos, wires, out)
                     out.append("</Frame>")
             out.append(f"</{tag}>")
+
+    def sr_offset(self, sr: "_Node") -> int:
+        """Where a shift register sits on its loop's left side, below the (stacked) ones before it."""
+        before = 0
+        for m in self.nodes.values():
+            if m is sr:
+                break
+            if m.owner == sr.owner and m.kind == "shiftreg":
+                before += self.sr_stack.get(m.name, 1)
+        return PAD_TOP + 30 * before
 
     def size(self, name: str, wires) -> tuple[int, int]:
         n = self.nodes[name]
@@ -757,7 +773,7 @@ class _Builder:
         for b in self.bodies(name):
             bw, bh, _ = self.layout(b, wires)
             w, h = max(w, bw), max(h, bh)
-        side = sum(1 for m in self.nodes.values() if m.owner == name)
+        side = sum(self.sr_stack.get(m.name, 1) for m in self.nodes.values() if m.owner == name)
         return (max(w + 2 * PAD_X, 160),
                 max(h + PAD_TOP + PAD_BOTTOM, 110, PAD_TOP + 30 * side + PAD_BOTTOM))
 
@@ -846,7 +862,7 @@ class _Builder:
                     self.emit(name, pos, wires, out)
                     for k, sr in enumerate(side):
                         out.append(f"<ShiftRegister name={quoteattr(sr.name)} location=\"left\" "
-                                   f"offset=\"{PAD_TOP + 30 * k}\"></ShiftRegister>")
+                                   f"offset=\"{self.sr_offset(sr)}\"{self.out_attr(sr.name)}></ShiftRegister>")
                     out.append("</Structure>")
 
 
@@ -960,8 +976,12 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
             w = [w.get("from"), w.get("to")]
         if not (isinstance(w, (list, tuple)) and len(w) == 2 and all(isinstance(x, str) for x in w)):
             raise SpecError(f"wire {w!r} must be [\"from\", \"to\"]")
-        if any(_by_ref(b, e) for e in w):
-            ref_wires.append(tuple(_ref_end(b, e, labels, w, edit or bool(existing)) for e in w))
+        if any(_by_ref(b, e) for e in w) or (any(_late_end(b, e) for e in w) and any(
+                b.nodes.get(e.partition(".")[0]) is not None and b.nodes[e.partition(".")[0]].kind == "shiftreg"
+                for e in w)):
+            # (a Property/Invoke Node or By Name element to a shift register: the late script cannot
+            # bind a shift register, so that wire too is drawn between terminal references)
+            ref_wires.append(tuple(_ref_end(b, e, labels, w, edit or bool(existing), i) for i, e in enumerate(w)))
             continue
         ends = (b.resolve(w[0]), b.resolve(w[1]))
         frames = {f for f in (b.event_frame(e.partition(".")[0]) for e in w) if f}
@@ -1024,12 +1044,19 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
         events=[dict(e, out=b.out_index[e["name"]]) for e in
                 sorted(events, key=lambda e: b.event_order.index(e["name"]))],
         pnodes=pnodes, late=late, late_refs=late_refs, ref_wires=ref_wires,
+        stacks=sorted((b.out_index[n], k) for n, k in b.sr_stack.items()),
     )
+
+
+_SR_ELEMENT = re.compile(r"left\[(\d+)\]")
 
 
 def _by_ref(b: _Builder, end: str) -> bool:
     node, _, term = end.partition(".")
     n = b.nodes.get(node)
+    if n is not None and n.kind == "shiftreg":  # element 2.. of a stacked shift register
+        m = _SR_ELEMENT.fullmatch(term.lower())
+        return bool(m) and int(m.group(1)) >= 2
     if n is None or n.kind not in ("function", "subvi"):
         return False
     fn = str(n.spec.get("function", "")).strip()
@@ -1038,20 +1065,36 @@ def _by_ref(b: _Builder, end: str) -> bool:
     return bool(_TERM_BY_REF.search(term)) or (fn, term) in _SCRIPT_TERM_NONE or bool(grown_index)
 
 
-def _ref_end(b: _Builder, end: str, labels: dict, w, edit: bool):
-    """An end of a wire drawn between terminal references (see Script.ref_wires)."""
+def _ref_end(b: _Builder, end: str, labels: dict, w, edit: bool, at: int = 0):
+    """An end of a wire drawn between terminal references (see Script.ref_wires); `at` is 0 for the
+    wire's source, 1 for its sink."""
     node, _, term = end.partition(".")
     n = b.nodes.get(node)
     if n is None:
         raise SpecError(f"wire end {end!r}: no node named {node!r}")
     if edit:
         raise SpecError(f"wire {list(w)!r}: terminal {term!r} can only be wired by vi_create for now")
+    if n is not None and n.kind == "shiftreg":
+        t = term.lower()
+        m = _SR_ELEMENT.fullmatch(t)
+        k = int(m.group(1)) if m else 1 if t == "left" else 0 if t == "right" else None
+        if k is None:
+            b.resolve(end)  # raises the usual message
+        if b.event_frame(node):
+            raise SpecError(f"wire {list(w)!r}: stacked shift registers cannot be wired inside an event "
+                            "structure yet")
+        b.sr_stack[node] = max(b.sr_stack.get(node, 1), k)
+        b.out_index.setdefault(node, len(b.out_index))
+        # a left element's value comes from its inner terminal and its initial value goes into the
+        # outer one; the right side takes the next value inside and gives the last one outside
+        side = ("inner" if at == 0 else "outer") if k else ("outer" if at == 0 else "inner")
+        return ("sr", b.out_index[node], k, side)
     if b.event_frame(node):
         raise SpecError(f"wire {list(w)!r}: terminals with names a script cannot use cannot be wired "
                         "inside an event structure yet")
     if n.kind in ("control", "indicator"):
         return ("label", labels[node], "")
-    if n.kind in ("function", "subvi", "constant"):
+    if n.kind in ("function", "subvi", "constant", *_NODE_KINDS):
         if n.kind != "constant" and not term:
             raise SpecError(f"wire end {end!r}: give the terminal, e.g. \"{node}.x\"")
         return ("out", b.out_index.setdefault(node, len(b.out_index)), term)
@@ -1061,6 +1104,12 @@ def _ref_end(b: _Builder, end: str, labels: dict, w, edit: bool):
 
 _BYNAME = {"Unbundle By Name": "unbundle", "Bundle By Name": "bundle"}
 _BYNAME_FIXED = {"input cluster", "output cluster", ""}
+
+
+def _late_end(b: _Builder, end: str) -> bool:
+    """A terminal that exists only once its node is configured (see _plan_nodes)."""
+    n = b.nodes.get(end.partition(".")[0])
+    return n is not None and ((n.kind in _NODE_KINDS and n.bind is None) or _byname_elem(b, end))
 
 
 def _byname_elem(b: _Builder, end: str) -> bool:
@@ -1114,7 +1163,9 @@ def _plan_nodes(b: _Builder, late_raw: list, labels: dict):
         if n.kind in ("shiftreg", "tunnel", "event"):
             raise SpecError(f"a Property/Invoke Node or a Bundle/Unbundle By Name element cannot be wired to "
                             f"{nm!r} (a {n.kind}) yet; wire it through a function or constant")
-        existing.append({"name": nm, "kind": "existing" if n.kind in ("control", "indicator") else n.kind})
+        existing.append({"name": nm, "kind": "existing" if n.kind in ("control", "indicator") else n.kind,
+                         # a function's name decides how its terminals are named
+                         "spec": {"function": n.spec["function"]} if n.spec.get("function") else {}})
         refs.append(("in", n.bind, nm) if n.bind is not None
                     else ("out", b.out_index.setdefault(nm, len(b.out_index)), nm))
     late = build({"wires": late_raw}, existing=existing, edit=True)
