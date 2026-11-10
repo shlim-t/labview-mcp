@@ -210,7 +210,9 @@ async def vi_create(
       output cat.concatenated string; Build Array likewise ("appended array"); Unbundle (by
       position, size = number of cluster elements) -> u.cluster in, u.element[i] out; Format Into
       String with 2 inputs -> "size": 5, wired as fs.input 1, fs.input 2.
-      Unbundle By Name / Bundle By Name cannot pick elements yet; use Unbundle / Bundle.
+      Unbundle By Name / Bundle By Name: wire the cluster to "u.input cluster" and wire elements by
+      name ("u.gain", "b.offset"); the node shows the elements its wires name, in wire order (or set
+      "elements": [...] for another order). Element wires cannot go to a case output tunnel yet.
     A case wired to an error cluster has frames "No Error" and "Error".
     To pass a value through a case frame unchanged, give that frame "pass": [["acc.left", "t"]]
     (source, output tunnel); a wire from outside straight to an output tunnel does not work.

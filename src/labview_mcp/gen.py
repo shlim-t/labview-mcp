@@ -954,8 +954,8 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
             # [button, loop.stop]: read the button in its own Value Change frame (NI's pattern;
             # a latched button only resets when its terminal is read) and stop the loop from there.
             frames = {vc_frame[w[0]]}
-        if not frames and any(b.nodes[e.partition(".")[0]].kind in _NODE_KINDS
-                              and b.nodes[e.partition(".")[0]].bind is None for e in w):
+        if not frames and any((b.nodes[e.partition(".")[0]].kind in _NODE_KINDS
+                               and b.nodes[e.partition(".")[0]].bind is None) or _byname_elem(b, e) for e in w):
             late_raw.append(list(w))  # a Property/Invoke Node has its terminals once it is configured
         elif not frames:
             wires.append(ends)
@@ -1012,6 +1012,19 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
     )
 
 
+_BYNAME = {"Unbundle By Name": "unbundle", "Bundle By Name": "bundle"}
+_BYNAME_FIXED = {"input cluster", "output cluster", ""}
+
+
+def _byname_elem(b: _Builder, end: str) -> bool:
+    """An element terminal of a new Bundle / Unbundle By Name node ("u.gain"): it exists only once the
+    node is told which elements to show, after its cluster input is wired."""
+    node, _, term = end.partition(".")
+    n = b.nodes.get(node)
+    return (n is not None and n.kind == "function" and n.bind is None and not b.event_frame(node)
+            and str(n.spec.get("function", "")).strip() in _BYNAME and term not in _BYNAME_FIXED)
+
+
 def _plan_nodes(b: _Builder, late_raw: list, labels: dict):
     """Property/Invoke Nodes of this script (not those in event frames: their frame's script has them)
     and the script that wires them once configured."""
@@ -1026,6 +1039,25 @@ def _plan_nodes(b: _Builder, late_raw: list, labels: dict):
         write = list(range(len(items))) if w is True else [items.index(x) for x in w or []]
         pnodes.append({"name": name, "out": out, "kind": n.kind, "class": s.get("class"), "items": items,
                        "write": write, "control": s.get("control"), "method": s.get("method")})
+    elems: dict[str, list] = {}  # By Name node -> its element names, in wire order
+    for w in late_raw:
+        for e in w:
+            if _byname_elem(b, e):
+                node, _, term = e.partition(".")
+                if term not in elems.setdefault(node, []):
+                    elems[node].append(term)
+    for name, names in elems.items():
+        n = b.nodes[name]
+        given = n.spec.get("elements")
+        if given is not None:
+            if not (isinstance(given, list) and all(isinstance(x, str) for x in given)
+                    and set(names) <= set(given)):
+                raise SpecError(f"function {name!r}: \"elements\" must list every element it is wired by "
+                                f"({names})")
+            names = list(given)
+        pnodes.append({"name": name, "out": b.out_index.setdefault(name, len(b.out_index)), "kind": "byname",
+                       "function": _BYNAME[n.spec["function"].strip()], "items": names, "write": [],
+                       "control": None, "class": None, "method": None})
     if not late_raw:
         return pnodes, None, None
     ends = sorted({e.partition(".")[0] for w in late_raw for e in w})
@@ -1033,8 +1065,8 @@ def _plan_nodes(b: _Builder, late_raw: list, labels: dict):
     for nm in ends:
         n = b.nodes[nm]
         if n.kind in ("shiftreg", "tunnel", "event"):
-            raise SpecError(f"a Property/Invoke Node cannot be wired to {nm!r} (a {n.kind}) yet; wire it "
-                            "through a function or constant")
+            raise SpecError(f"a Property/Invoke Node or a Bundle/Unbundle By Name element cannot be wired to "
+                            f"{nm!r} (a {n.kind}) yet; wire it through a function or constant")
         existing.append({"name": nm, "kind": "existing" if n.kind in ("control", "indicator") else n.kind})
         refs.append(("in", n.bind, nm) if n.bind is not None
                     else ("out", b.out_index.setdefault(nm, len(b.out_index)), nm))

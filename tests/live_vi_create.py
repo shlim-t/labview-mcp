@@ -264,6 +264,23 @@ CASES = {
         "functions": [{"name": "f", "function": "To Double Precision Float"}],
         "wires": [["k", "f.number"], ["f.double precision float", "o"], ["k", "ts"]],
     }, {}, {"seconds": 100.0}),
+    # Unbundle By Name / Bundle By Name: elements chosen by name, in any order
+    "by_name": ({
+        "controls": [{"name": "c", "type": {"cluster": [{"name": "alpha", "type": "dbl"},
+                                                        {"name": "beta", "type": "string"},
+                                                        {"name": "gamma", "type": "i32"}]},
+                      "default": [1.5, "x", 7]},
+                     {"name": "s", "type": "string", "default": "new"}],
+        "indicators": [{"name": "g", "type": "i32", "label": "gamma out"},
+                       {"name": "a", "type": "dbl", "label": "alpha out"},
+                       {"name": "o", "type": {"cluster": [{"name": "alpha", "type": "dbl"},
+                                                          {"name": "beta", "type": "string"},
+                                                          {"name": "gamma", "type": "i32"}]}, "label": "out"}],
+        "functions": [{"name": "u", "function": "Unbundle By Name"},
+                      {"name": "b", "function": "Bundle By Name"}],
+        "wires": [["c", "u.input cluster"], ["u.gamma", "g"], ["u.alpha", "a"],
+                  ["c", "b.input cluster"], ["s", "b.beta"], ["b.output cluster", "o"]],
+    }, {}, {"gamma out": 7, "alpha out": 1.5, "out": [1.5, "new", 7]}),
     # an unwired error (Not a Refnum into a Property Node) must not open LabVIEW's automatic error
     # dialog, which would block LabVIEW and hang this run
     "no_error_dialog": ({

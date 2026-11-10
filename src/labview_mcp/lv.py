@@ -508,6 +508,16 @@ class LabVIEW:
         rename: dict[str, str] = {}
         for pn in script.pnodes:
             ref = outs[pn["out"]]
+            if pn["kind"] == "byname":  # Bundle / Unbundle By Name: which elements it shows
+                h = self._helper(UNBNAMES_VI if pn["function"] == "unbundle" else BUNNAMES_VI)
+                h.SetControlValue("reference", ref)
+                h.SetControlValue("count", len(pn["items"]))
+                h.SetControlValue("names", list(pn["items"]))
+                self._run_checked(h, f"choosing the elements {pn['items']} of {pn['name']!r} (are they names "
+                                     "of the wired cluster's elements?)")
+                node_terms[pn["name"]] = [n for _, n in sorted(self._owned(target, "Terminal", self._uid_of(ref),
+                                                                          names=True))]
+                continue
             what = f"{'property' if pn['kind'] == 'pnode' else 'invoke'} node {pn['name']!r}"
             if pn["control"]:
                 fp = fp if fp is not None else self._fp_refs_by_label(target)
@@ -1905,6 +1915,20 @@ class LabVIEW:
                 if below:
                     n["value"] = _jsonable(by_uid[max(below)])
 
+    def _conpane_by_index(self, target) -> dict:
+        """Connector-pane terminal index -> (label, refnum) of the control assigned to it."""
+        h = self._helper(CONPANE_VI)
+        h.SetControlValue("reference", target)
+        self._run_checked(h, "reading the connector pane")
+        lab = self._vi(str(Path(self.app.ApplicationDirectory) / _VILIB_TREF / "Get GObject Label.vi"))
+        out = {}
+        for i, r in enumerate(h.GetControlValue("Controls[]") or ()):
+            if r:
+                lab.SetControlValue("GObject", r)
+                lab.Run(False)
+                out[i] = (lab.GetControlValue("Object Label") or "", r)
+        return out
+
     def _top_controls(self, target) -> list:
         """(label, refnum) of the top-level front-panel controls and indicators."""
         h = self._helper(UIDS_VI)
@@ -2056,12 +2080,20 @@ class LabVIEW:
         paired = {}
         if unlabeled:
             known = {n.get("label") for n in g["nodes"] if n["kind"] in ("control", "indicator")}
+            # first by connector-pane terminal (DFIR's conpane_index is the terminal's index)
+            pane = _try(lambda: self._conpane_by_index(target), {}) or {}
+            for n in list(unlabeled):
+                x = pane.get(n.get("conpane_index", -1))
+                if x is not None and x[0] not in known:
+                    paired[id(n)] = x
+                    known.add(x[0])
+                    unlabeled.remove(n)
             rest = [(lb, r) for lb, r in (_try(lambda: self._top_controls(target), []) or [])
                     if lb not in known or not lb]
-            if len(rest) == len(unlabeled):
+            if unlabeled and len(rest) == len(unlabeled):
                 rest.sort(key=lambda x: _try(lambda: self._uid_of(x[1]), 0))
                 unlabeled.sort(key=lambda n: n.get("uid", 0))
-                paired = {id(n): x for n, x in zip(unlabeled, rest)}
+                paired.update({id(n): x for n, x in zip(unlabeled, rest)})
         for n in g["nodes"]:
             is_const = n["kind"] == "constant"
             ok = buildable(n.get("type")) if n.get("type") is not None else False
@@ -2141,6 +2173,8 @@ TIMEOUTTERM_VI = VIS_DIR / "lvmcp_timeoutterm.vi"
 EVENTSEL_VI = VIS_DIR / "lvmcp_eventsel.vi"
 TERMCONST_VI = VIS_DIR / "lvmcp_termconst.vi"
 OUTCNT_VI = VIS_DIR / "lvmcp_outcnt.vi"
+UNBNAMES_VI = VIS_DIR / "lvmcp_unbnames.vi"
+BUNNAMES_VI = VIS_DIR / "lvmcp_bunnames.vi"
 CONSTTYPE_VI = VIS_DIR / "lvmcp_consttype.vi"
 CTLTYPE_VI = VIS_DIR / "lvmcp_ctltype.vi"
 CONPANE_VI = VIS_DIR / "lvmcp_conpane.vi"

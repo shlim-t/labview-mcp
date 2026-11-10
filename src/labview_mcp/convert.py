@@ -157,6 +157,17 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
         except _Unsupported as e:
             bad(str(e))
 
+    # -- a class's private data is unbundled / bundled only by VIs of that class
+    fn_of = {n["id"]: n.get("function") for n in g["nodes"] if n["kind"] == "function"}
+    for w in g["wires"]:
+        if "lvclass" not in json.dumps(w.get("type")):
+            continue
+        ins = [fn_of.get(_end(t)[0].split("[")[0]) for t in w["to"]]
+        out = fn_of.get(_end(w.get("from") or "")[0].split("[")[0])
+        if any(f in ("Unbundle", "Unbundle By Name") for f in ins) or out in ("Bundle", "Bundle By Name"):
+            bad("class private data (Bundle/Unbundle of a class: the VI must belong to the class)")
+            break
+
     # -- shift registers: one name per left/right pair; a right with several lefts is a stacked one
     sr_name = {}
     lefts_of = collections.Counter(n.get("pair") for n in srs.values() if n["kind"] == "shift_register_right")
@@ -229,6 +240,9 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
             m = re.match(r"([^.]+)\.(?:element|value|string|error in)\[(\d+)\]$", e)
             if m:
                 sizes[m.group(1)] = max(sizes[m.group(1)], int(m.group(2)))
+            m = re.match(r"([^.]+)\.input (\d+)$", e)  # Format Into String: size = inputs + 3
+            if m and fn_of.get(m.group(1)) == "Format Into String":
+                sizes[m.group(1)] = max(sizes[m.group(1)], int(m.group(2)) + 3)
     for d in contents.values():
         for f in d.get("functions", []):
             if f["name"] in sizes:

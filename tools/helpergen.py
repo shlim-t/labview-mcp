@@ -180,6 +180,25 @@ def build_helper(lv: LabVIEW, path: Path, spec: dict) -> dict:
         h.SetControlValue("reference", tref)
         lv._run_checked(h, f"making an indicator for {node}.{term}")
         made[term] = sorted(set(lv._fp_refs_by_label(t)) - before)
+    # Inputs whose terminal name holds "[]" (e.g. ElemNms[]): a control made from the terminal
+    # (Terminal.Create Control), then labelled as the spec says
+    for node, term, label in spec.get("term_controls", []):
+        uid = lv._uid_of(refs[[n["name"] for n in nodes].index(node)])
+        by_uid = dict(lv._owned(t, "Terminal", uid))
+        tref = next((by_uid[u] for u, nm in lv._owned(t, "Terminal", uid, names=True) if nm == term), None)
+        if tref is None:
+            raise LabVIEWError(f"{node} has no terminal {term!r}")
+        before = {lv._uid_of(r) for _, r in lv._top_controls(t)}
+        h = lv._helper(path.parent / "lvmcp_termctl.vi")  # generated before (ORDER)
+        h.SetControlValue("reference", tref)
+        lv._run_checked(h, f"making a control for {node}.{term}")
+        new = [r for _, r in lv._top_controls(t) if lv._uid_of(r) not in before]
+        if len(new) != 1:
+            raise LabVIEWError(f"control for {node}.{term}: expected one new control, got {len(new)}")
+        rl = lv._helper(path.parent / "lvmcp_relabel.vi")
+        rl.SetControlValue("reference", new[0])
+        rl.SetControlValue("text", label)
+        lv._run_checked(rl, f"labelling the control for {node}.{term}")
     t.SaveInstrument(str(path), False, False)
     return {"path": str(path), **({"indicators made": made} if made else {})}
 
@@ -321,6 +340,13 @@ HELPERS["lvmcp_termind"] = {
     "nodes": [{"name": "k", "kind": "invoke", "class": "Terminal", "method": "Create Indicator"}],
     "wires": [("reference", "k.reference"), ("k.error out", "error out")],
 }
+# Terminal.Create Control: a control wired to a terminal (for inputs named "...[]")
+HELPERS["lvmcp_termctl"] = {
+    "controls": [("reference", "ref:Terminal")],
+    "indicators": [("error out", "error")],
+    "nodes": [{"name": "k", "kind": "invoke", "class": "Terminal", "method": "Create Control"}],
+    "wires": [("reference", "k.reference"), ("k.error out", "error out")],
+}
 # VI.Connector Pane -> ConnectorPane.Controls[]: the front-panel controls in connector-terminal order
 # (unassigned terminals give Not a Refnum); readable for password-protected VIs too
 HELPERS["lvmcp_conpane"] = {
@@ -388,6 +414,20 @@ HELPERS["lvmcp_setcasenames"] = {
     "nodes": [{"name": "w", "kind": "property", "class": "CaseStructure", "items": ["FrameNames"], "write": True}],
     "wires": [("reference", "w.reference"), ("names", "w.FrameNames"), ("w.error out", "error out")],
 }
+# NamedUnbundler / NamedBundler: element count and Element Names[] (write) — which cluster elements an
+# Unbundle By Name / Bundle By Name node shows, set after its cluster input is wired
+def _elemnames_helper(cls: str, cnt: str) -> dict:
+    return {
+        "controls": [("reference", f"ref:{cls}"), ("count", "i32")],
+        "indicators": [("error out", "error")],
+        "nodes": [{"name": "w", "kind": "property", "class": cls, "items": [cnt, "ElemNms[]"], "write": True}],
+        "wires": [("reference", "w.reference"), ("count", f"w.{cnt}"), ("w.error out", "error out")],
+        "term_controls": [("w", "ElemNms[]", "names")],
+    }
+
+
+HELPERS["lvmcp_unbnames"] = _elemnames_helper("NamedUnbundler", "OutputCnt")
+HELPERS["lvmcp_bunnames"] = _elemnames_helper("NamedBundler", "InputCnt")
 # MultiFrameStructure.Remove Frame
 HELPERS["lvmcp_removeframe"] = {
     "controls": [("reference", "ref:MultiFrameStructure"), ("Frame Index", "i32")],
@@ -481,9 +521,10 @@ HELPERS["lvmcp_itemterm"] = {
 }
 
 ORDER = ["lvmcp_move", "lvmcp_propwrite", "lvmcp_proplink", "lvmcp_invokelink", "lvmcp_uid", "lvmcp_classname",
-         "lvmcp_allprops", "lvmcp_signal", "lvmcp_fire", "lvmcp_timeoutterm", "lvmcp_eventsel", "lvmcp_termconst", "lvmcp_outcnt", "lvmcp_consttype", "lvmcp_ctltype", "lvmcp_termind", "lvmcp_conpane", "lvmcp_subvipath", "lvmcp_relabel", "lvmcp_constvalue",
+         "lvmcp_allprops", "lvmcp_signal", "lvmcp_fire", "lvmcp_timeoutterm", "lvmcp_eventsel", "lvmcp_termconst", "lvmcp_outcnt", "lvmcp_consttype", "lvmcp_ctltype", "lvmcp_termind", "lvmcp_termctl", "lvmcp_conpane", "lvmcp_subvipath", "lvmcp_relabel", "lvmcp_constvalue",
          "lvmcp_rep", "lvmcp_constrep", "lvmcp_casenames", "lvmcp_setcasenames",
-         "lvmcp_removeframe", "lvmcp_setpos", "lvmcp_autoerr", "lvmcp_pnodeinfo", "lvmcp_inodeinfo", "lvmcp_propitemset", "lvmcp_propitems", "lvmcp_itemterm"]
+         "lvmcp_removeframe", "lvmcp_setpos", "lvmcp_autoerr", "lvmcp_pnodeinfo", "lvmcp_inodeinfo", "lvmcp_propitemset", "lvmcp_propitems", "lvmcp_itemterm",
+         "lvmcp_unbnames", "lvmcp_bunnames"]
 
 
 def main(args: list[str]) -> None:
