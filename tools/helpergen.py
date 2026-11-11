@@ -445,6 +445,13 @@ HELPERS["lvmcp_concat"] = {
     "nodes": [{"name": "w", "kind": "property", "class": "BuildArray", "items": ["ConcatInputs"], "write": True}],
     "wires": [("reference", "w.reference"), ("concatenate", "w.ConcatInputs"), ("w.error out", "error out")],
 }
+# LoopTunnel.Index Mode (write): a loop tunnel's indexing (Last Value / Indexing / ...)
+HELPERS["lvmcp_indexmode"] = {
+    "controls": [("reference", "ref:LoopTunnel"), ("mode", "i32")],
+    "indicators": [("error out", "error")],
+    "nodes": [{"name": "w", "kind": "property", "class": "LoopTunnel", "items": ["IndexMode"], "write": True}],
+    "wires": [("reference", "w.reference"), ("mode", "w.IndexMode"), ("w.error out", "error out")],
+}
 # MultiFrameStructure.Remove Frame
 HELPERS["lvmcp_removeframe"] = {
     "controls": [("reference", "ref:MultiFrameStructure"), ("Frame Index", "i32")],
@@ -637,7 +644,7 @@ ORDER = ["lvmcp_move", "lvmcp_propwrite", "lvmcp_proplink", "lvmcp_invokelink", 
          "lvmcp_allprops", "lvmcp_signal", "lvmcp_fire", "lvmcp_timeoutterm", "lvmcp_eventsel", "lvmcp_termconst", "lvmcp_outcnt", "lvmcp_consttype", "lvmcp_ctltype", "lvmcp_termind", "lvmcp_termctl", "lvmcp_conpane", "lvmcp_subvipath", "lvmcp_relabel", "lvmcp_constvalue",
          "lvmcp_rep", "lvmcp_constrep", "lvmcp_casenames", "lvmcp_setcasenames",
          "lvmcp_removeframe", "lvmcp_setpos", "lvmcp_autoerr", "lvmcp_pnodeinfo", "lvmcp_inodeinfo", "lvmcp_propitemset", "lvmcp_propitems", "lvmcp_itemterm",
-         "lvmcp_unbnames", "lvmcp_bunnames", "lvmcp_connect", "lvmcp_concat"]
+         "lvmcp_unbnames", "lvmcp_bunnames", "lvmcp_connect", "lvmcp_concat", "lvmcp_indexmode"]
 
 
 def main(args: list[str]) -> None:

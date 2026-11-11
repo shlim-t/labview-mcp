@@ -258,6 +258,7 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
     edges = [(a, b) for a, b in edges if not any(a == f"{p[0]}.inner[frame {p[3]}]"
                                                  and b == f"{p[1]}.inner[frame {p[3]}]" for p in passes)]
     through = collections.defaultdict(list)  # (event structure, frame) -> [[from, to]]
+    via: dict[tuple, set] = {}  # collapsed edge -> the tunnels it passes through
     for stage in ("other tunnels", "event tunnels"):
       for _ in range(20):  # collapse tunnels (nested structures chain them)
         changed = False
@@ -266,13 +267,17 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
                 continue
             entry, exit_ = side(tid, t)
             # an output tunnel of a multi-frame structure has one inner end per frame
-            ins = [a for a, b in edges if b == entry or b.startswith(entry + "[")]
+            ins = [(a, b) for a, b in edges if b == entry or b.startswith(entry + "[")]
             # a case's input tunnel has one inner end per frame: "tunnel_3.inner[frame 1]"
-            outs = [b for a, b in edges if a == exit_ or a.startswith(exit_ + "[")]
+            outs = [(a, b) for a, b in edges if a == exit_ or a.startswith(exit_ + "[")]
             if ins or outs:
                 edges = [(a, b) for a, b in edges if b != entry and not b.startswith(entry + "[")
                          and a != exit_ and not a.startswith(exit_ + "[")]
-                edges += [(a, b) for a in ins for b in outs]
+                for ia in ins:
+                    for ob in outs:
+                        e = (ia[0], ob[1])
+                        edges.append(e)
+                        via[e] = via.get(e, set()) | via.get(ia, set()) | via.get(ob, set()) | {tid}
                 changed = True
         if not changed:
             break
@@ -312,6 +317,7 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
         return False
 
     wires = []
+    wire_idx: dict[int, dict] = {}  # wires[i] -> {loop: indexing?} where it differs from LabVIEW's default
     case_pass = collections.defaultdict(list)  # (case, frame index) -> [[source, output tunnel]]
     for a, b in edges:
         try:
@@ -324,6 +330,10 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
             # a value from outside the frame, passed on unchanged to the output tunnel
             case_pass[(tunnels[m.group(1)]["structure"], int(m.group(2)))].append([src, dst])
             continue
+        idx = _tunnel_indexing(via.get((a, b), ()), tunnels, nodes, direction)
+        if idx:
+            features.add("loop tunnel indexing set")
+            wire_idx[len(wires)] = idx
         wires.append([src, dst])
 
     # -- growable nodes: size from the highest element[k] wired
@@ -413,7 +423,10 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
 
     for c in controls + indicators:  # the connector pane is not compared; 12+ terminals would not fit
         c["connector"] = False
-    spec = {"controls": controls, "indicators": indicators, **fill(""), "wires": wires}
+    top = fill("")  # (reads the wires as [from, to] pairs)
+    spec = {"controls": controls, "indicators": indicators, **top,
+            "wires": [{"from": w[0], "to": w[1], "indexing": wire_idx[i]} if i in wire_idx else w
+                      for i, w in enumerate(wires)]}
     return spec, sorted(set(unsupported)), sorted(features)
 
 
@@ -511,6 +524,24 @@ def _event_frame(fr: dict, es: str, entry: dict, own: dict, timeout, label_id: d
     for role, nid in own.items():
         entry[role] = nid
     return entry
+
+
+def _tunnel_indexing(tids, tunnels: dict, nodes: dict, direction) -> dict:
+    """{loop: indexing?} for the loop tunnels a wire passes through whose mode is not the one LabVIEW
+    gives a new tunnel: a For Loop indexes arrays in and values out, a While Loop does not."""
+    out = {}
+    for tid in tids:
+        t = tunnels.get(tid) or {}
+        loop = nodes.get(t.get("structure"), {})
+        mode = t.get("mode")
+        if loop.get("kind") == "for_loop" and mode == "LastValue":
+            typ = t.get("type")
+            arr = isinstance(typ, dict) and "array" in typ or isinstance(typ, str) and typ.endswith("[]")
+            if direction(tid, t) == "output" or arr:
+                out[t["structure"]] = False
+        elif loop.get("kind") == "while_loop" and mode == "AutoIndexed":
+            out[t["structure"]] = True
+    return out
 
 
 def _selector_kind(case: str, wires, nodes, wire_types: dict) -> str | None:

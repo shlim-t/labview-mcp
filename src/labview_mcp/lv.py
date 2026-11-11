@@ -484,6 +484,8 @@ class LabVIEW:
                         raise LabVIEWError("setting a case tunnel to Use Default if Unwired: tunnel not found")
                     ud.SetControlValue("reference", sel[tun])
                     self._run_checked(ud, "setting a case tunnel to Use Default if Unwired")
+            if script.index_modes:
+                self._set_index_modes(target, script.index_modes, out_refs)
             rest = {k: v for k, v in (script.styles or {}).items() if k not in early}
             if rest:
                 self._apply_styles(target, rest)
@@ -752,6 +754,74 @@ class LabVIEW:
             svr.SetControlValue("path", path)
             svr.SetControlValue("strict", bool(strict))
             self._run_checked(svr, f"pointing a Static VI Reference at {path}")
+
+    def _set_index_modes(self, target, modes: list, outs: list) -> None:
+        """Set the loop tunnels a wire passes through to indexing / last value (LoopTunnel.Index
+        Mode 1 / 0). The tunnels are found by following the wire from its source to its sink through
+        tunnels: a terminal's wire UID joins it to the other terminals on that wire."""
+        h = self._helper(UIDS_VI)
+        h.SetControlValue("VI Refnum", target)
+        h.SetControlValue("Traverse Target", 1)
+        h.SetControlValue("Class Name", "GObject")
+        h.Run(False)
+        cols = [list(h.GetControlValue(c) or ()) for c in ("UIDs", "Classes", "Owner UIDs", "Wire UIDs", "Names")]
+        cls_of, owner_of = {}, {}
+        on_wire: dict[int, list] = {}   # wire uid -> [(object uid, terminal name)]
+        wires_of: dict[int, list] = {}  # object uid -> [(wire uid, terminal name)]
+        for u, c, o, wu, nm in zip(*cols):
+            cls_of.setdefault(u, c)
+            owner_of.setdefault(u, o)
+        for u, c, o, wu, nm in zip(*cols):
+            if wu and c != "Wire":
+                obj = u if c == "ControlTerminal" else o  # a terminal belongs to its node
+                on_wire.setdefault(wu, []).append((obj, nm))
+                wires_of.setdefault(obj, []).append((wu, nm))
+        labels = {nm: u for u, c, o, wu, nm in zip(*cols) if c == "ControlTerminal"}
+
+        def obj_of(end):
+            if end[0] == "label":
+                return labels.get(end[1])
+            u = self._uid_of(outs[end[1]])
+            return owner_of.get(u, u) if cls_of.get(u, "").endswith("Terminal") else u
+
+        tunnels = self._all_of(target, "LoopTunnel")
+        h = self._helper(INDEXMODE_VI)
+        for a, z, loops in modes:
+            src, dst = obj_of(a), obj_of(z)
+            if cls_of.get(src) in ("ForLoop", "WhileLoop"):
+                # its iteration terminal sits on its inner diagram (unnamed): start from every
+                # terminal there; only the wire that reaches the sink counts
+                inner = {u for u, o in owner_of.items() if o == src and cls_of.get(u) == "Diagram"}
+                start = [wu for u, c, o, wu, nm in zip(*cols) if c == "Terminal" and o in inner and wu]
+            else:
+                start = [wu for wu, nm in wires_of.get(src, []) if not a[2] or nm == a[2]] or                     [wu for wu, _ in wires_of.get(src, [])]
+            # breadth-first from the source's wires, passing through tunnels only
+            prev, seen, todo, hit = {}, set(start), list(start), None
+            while todo and hit is None:
+                wu = todo.pop(0)
+                for obj, nm in on_wire.get(wu, []):
+                    if obj == dst:  # (any terminal of it: names a script uses may differ)
+                        hit = wu
+                        break
+                    if obj != src and cls_of.get(obj, "").endswith("Tunnel") and ("t", obj) not in prev:
+                        prev[("t", obj)] = wu
+                        for w2, _ in wires_of.get(obj, []):
+                            if w2 not in seen:
+                                seen.add(w2)
+                                prev[("w", w2)] = obj
+                                todo.append(w2)
+            if hit is None:
+                raise LabVIEWError("setting a loop tunnel's indexing: the wire was not found")
+            path, wu = [], hit
+            while ("w", wu) in prev:
+                path.append(prev[("w", wu)])
+                wu = prev[("t", prev[("w", wu)])]
+            want = {self._uid_of(outs[k]): v for k, v in loops}
+            for t in path:
+                if owner_of.get(t) in want and t in tunnels:
+                    h.SetControlValue("reference", tunnels[t])
+                    h.SetControlValue("mode", 1 if want[owner_of[t]] else 0)
+                    self._run_checked(h, "setting a loop tunnel's indexing")
 
     def _concatenate(self, target, concats: list, outs: list) -> None:
         """Switch placed Build Arrays to Concatenate Inputs."""
@@ -2249,7 +2319,10 @@ class LabVIEW:
         for w in g["wires"]:
             for e, is_out in [(w.get("from"), True)] + [(t, False) for t in w["to"]]:
                 node, _, term = (e or "").partition(".")
-                if node in funcs and term and not term.startswith("element["):
+                # (Format Into String's "input 2"...: a default-size node has only "input 1", so a
+                # later input must keep its name, not be paired with a leftover terminal)
+                if node in funcs and term and not term.startswith("element[") \
+                        and not re.fullmatch(r"input \d+", term):
                     used.setdefault(node, {})[term] = is_out
         fixes: dict[str, dict[str, str]] = {}
         for node, terms in used.items():
@@ -2645,6 +2718,7 @@ USEDEFAULT_VI = VIS_DIR / "lvmcp_usedefault.vi"
 INPUTCNT_VI = VIS_DIR / "lvmcp_inputcnt.vi"
 STATICVI_VI = VIS_DIR / "lvmcp_staticvi.vi"
 CONCAT_VI = VIS_DIR / "lvmcp_concat.vi"
+INDEXMODE_VI = VIS_DIR / "lvmcp_indexmode.vi"
 STATICVIINFO_VI = VIS_DIR / "lvmcp_staticviinfo.vi"
 
 

@@ -237,6 +237,9 @@ async def vi_create(
     A case wired to an error cluster has frames "No Error" and "Error".
     To pass a value through a case frame unchanged, give that frame "pass": [["acc.left", "t"]]
     (source, output tunnel); a wire from outside straight to an output tunnel does not work.
+    Loop tunnels: a For Loop indexes arrays going in and builds arrays coming out, a While Loop
+    does neither. To change that, give the wire as {"from": ..., "to": ..., "indexing": false}
+    (or true; or {"<loop>": false} for one of several loops it crosses).
     Queues (producer/consumer, queued message handler): "Obtain Queue" (wire a constant of the
     element type to "element data type"; "queue out"), "Enqueue Element" ("queue", "element"),
     "Dequeue Element" ("queue", "element" out, "queue out"), "Release Queue" ("queue"). Loops in

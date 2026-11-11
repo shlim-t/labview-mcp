@@ -426,10 +426,13 @@ class Script:
     static_refs: list = None
     # Build Arrays to switch to Concatenate Inputs (indexes into outs), before anything is wired to them
     concats: list = None
+    # loop tunnels whose indexing differs from LabVIEW's default, set once everything is wired:
+    # [(source end, sink end, [(k, indexing?)])], ends as in ref_wires, k = the loop's index into outs
+    index_modes: list = None
 
     def has_nodes(self) -> bool:
         return bool(self.pnodes) or bool(self.ref_wires) or bool(self.stacks) or bool(self.use_default) \
-            or bool(self.replaces) or bool(self.static_refs) or bool(self.concats) or any(fr["script"] is not None and fr["script"].has_nodes()
+            or bool(self.replaces) or bool(self.static_refs) or bool(self.concats) or bool(self.index_modes) or any(fr["script"] is not None and fr["script"].has_nodes()
                                         for ev in self.events or [] for fr in ev["frames"])
 
 
@@ -1062,9 +1065,13 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
     spec_wires = [list(w) if isinstance(w, (list, tuple)) else w for w in spec.get("wires", []) or []]
     spec_wires += _byname_bridges(b, spec_wires)
     ref_raw = []  # spec wires drawn between terminal references
+    index_modes = []  # loop tunnels set to (or from) indexing: see Script.index_modes
     for w in spec_wires + b.extra_wires:
         if isinstance(w, dict):
+            idx = w.get("indexing")
             w = [w.get("from"), w.get("to")]
+            if idx is not None and all(isinstance(x, str) for x in w):
+                index_modes.append(_index_mode(b, w, idx, labels, edit or bool(existing)))
         if not (isinstance(w, (list, tuple)) and len(w) == 2 and all(isinstance(x, str) for x in w)):
             raise SpecError(f"wire {w!r} must be [\"from\", \"to\"]")
         if any(_by_ref(b, e) for e in w) or (any(_late_end(b, e) for e in w) and any(
@@ -1156,6 +1163,7 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
         replaces=replaces,
         static_refs=static_refs,
         concats=concats,
+        index_modes=index_modes,
         use_default=use_default,
     )
 
@@ -1179,6 +1187,45 @@ def _by_ref(b: _Builder, end: str) -> bool:
     # a grown Index Array's index terminals have no name a script accepts
     grown_index = fn == "Index Array" and n.spec.get("size") is not None and re.fullmatch(r"index(\[\d+\])?", term)
     return bool(_TERM_BY_REF.search(term)) or (fn, term) in _SCRIPT_TERM_NONE or bool(grown_index)
+
+
+def _index_mode(b: _Builder, w, idx, labels: dict, edit: bool):
+    """A wire's "indexing": true / false (every loop it crosses) or {loop: true / false}."""
+    if edit:
+        raise SpecError(f"wire {list(w)!r}: \"indexing\" is set by vi_create only for now")
+    def within(node: str, loop: str) -> bool:  # node sits inside loop (at any depth)
+        if node == loop:  # the loop's own terminals (i, N, stop) are inside it
+            return True
+        n = b.nodes[node]
+        c = b.nodes[n.owner].container if n.kind in ("shiftreg", "tunnel") else n.container
+        while c:
+            if b.owner_of[c] == loop:
+                return True
+            c = b.nodes[b.owner_of[c]].container
+        return False
+    if isinstance(idx, bool):  # every loop the wire crosses: one end inside it, the other not
+        ns = [e.partition(".")[0] for e in w]
+        if not all(x in b.nodes for x in ns):
+            raise SpecError(f"wire {list(w)!r}: no such node")
+        idx = {m.name: idx for m in b.nodes.values() if m.kind in ("for", "while")
+               and within(ns[0], m.name) != within(ns[1], m.name)}
+    if not (isinstance(idx, dict) and all(isinstance(v, bool) for v in idx.values())):
+        raise SpecError(f"wire {list(w)!r}: \"indexing\" is true, false or {{\"<loop>\": true/false}}")
+    for name in idx:
+        if name not in b.nodes or b.nodes[name].kind not in ("for", "while"):
+            raise SpecError(f"wire {list(w)!r}: \"indexing\" names {name!r}, which is not a For or While Loop")
+    ends = []
+    for e in w:
+        node, _, term = e.partition(".")
+        n = b.nodes.get(node)
+        if n is None:
+            raise SpecError(f"wire end {e!r}: no node named {node!r}")
+        if b.event_frame(node):
+            raise SpecError(f"wire {list(w)!r}: \"indexing\" cannot be set inside an event structure yet")
+        ends.append(("label", labels[node], "") if n.kind in ("control", "indicator")
+                    else ("out", b.out_index.setdefault(node, len(b.out_index)),
+                          "" if n.kind in ("shiftreg", "tunnel") else term))
+    return (ends[0], ends[1], [(b.out_index.setdefault(k, len(b.out_index)), v) for k, v in idx.items()])
 
 
 def _ref_end(b: _Builder, end: str, labels: dict, w, edit: bool, at: int = 0):

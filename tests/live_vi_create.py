@@ -378,6 +378,18 @@ CASES = {
         "functions": [{"name": "ba", "function": "Build Array", "size": 2, "concatenate": True}],
         "wires": [["a", "ba.element[1]"], ["b", "ba.element[2]"], ["ba.appended array", "o"]],
     }, {}, {"o": [1.0, 2.0, 3.0]}),
+    # "indexing" on a wire sets the loop tunnels it crosses: a whole array into a For Loop (not
+    # indexed), a While Loop collecting its values (indexed)
+    "tunnel_indexing": ({
+        "controls": [{"name": "a", "type": "dbl[]", "default": [1, 2]}],
+        "indicators": [{"name": "sizes", "type": "i32[]"}, {"name": "seen", "type": "i32[]"}],
+        "constants": [{"name": "n", "type": "i32", "value": 3}, {"name": "two", "type": "i32", "value": 2}],
+        "structures": [{"name": "F", "type": "for_loop", "functions": [{"name": "sz", "function": "Array Size"}]},
+                       {"name": "W", "type": "while_loop", "functions": [{"name": "ge", "function": "Greater Or Equal?"}]}],
+        "wires": [["n", "F.N"], {"from": "a", "to": "sz.array", "indexing": False}, ["sz.size(s)", "sizes"],
+                  ["W.i", "ge.x"], ["two", "ge.y"], ["ge.x >= y?", "W.stop"],
+                  {"from": "W.i", "to": "seen", "indexing": True}],
+    }, {}, {"sizes": [2, 2, 2], "seen": [0, 1, 2]}),
     # a By Name element wired to a case output tunnel goes through an Always Copy node
     "by_name_to_tunnel": ({
         "controls": [{"name": "c", "type": {"cluster": [{"name": "x", "type": "dbl"}, {"name": "k", "type": "i32"}]},
