@@ -455,6 +455,8 @@ class _Builder:
         self.sr_stack: dict[str, int] = {}  # stacked shift register -> number of left elements
         self.event_order: list[str] = []     # event structures in emit (= creation) order
         self.extra_wires: list = []           # wires the builder adds itself (case "pass")
+        self.case_passes: list = []           # case "pass" entries: (case, frame, source, tunnel)
+        self.pass_refs: list = []             # those drawn by terminal reference (no copy node)
 
     # -- collection
     def add(self, name, kind, container, spec, owner=""):
@@ -634,18 +636,15 @@ class _Builder:
             tunnels = list(st.get("output_tunnels", []) or [])
             for t in tunnels:
                 self.add(t, "tunnel", container, {}, owner=name)
-            # "pass": [[source, tunnel]] passes a value through this frame unchanged. A wire from
-            # outside straight to an output tunnel would land on the tunnel's outer side, so the
-            # value goes through an Always Copy node in the frame.
+            # "pass": [[source, tunnel]] passes a value through this frame unchanged (see
+            # _plan_passes: wired by terminal reference, or through an Always Copy node)
             for i, fr in enumerate(cases):
                 for k, pw in enumerate(fr.get("pass") or []):
                     if not (isinstance(pw, (list, tuple)) and len(pw) == 2 and pw[1] in tunnels
                             and isinstance(pw[0], str)):
                         raise SpecError(f"case {name!r} frame {i}: \"pass\" is a list of [source, output "
                                         f"tunnel] pairs; output tunnels: {tunnels}")
-                    cp = f"_pass_{name}_{i}_{k}"
-                    self.add(cp, "function", f"{name}#{i}", {"name": cp, "function": "Always Copy"})
-                    self.extra_wires += [[pw[0], f"{cp}.Input"], [f"{cp}.Output", pw[1]]]
+                    self.case_passes.append((name, i, pw[0], pw[1]))
         extra = set(st) - allowed
         if extra:
             raise SpecError(f"structure {name!r}: unknown keys {sorted(extra)}. {STRUCTURE_HELP}")
@@ -1038,6 +1037,7 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
         raise SpecError("the diagram needs at least one constant, function, subVI or structure")
 
     wires, late_raw, ref_wires = [], [], []
+    _plan_passes(b, ref_wires, labels, edit or bool(existing))
     frame_wires: dict[str, list] = {}  # event frame id -> wires drawn in that frame, in spec syntax
     vc_frame: dict[str, str] = {}  # control -> its only Value Change frame
     for n in list(b.nodes.values()):
@@ -1092,6 +1092,7 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
                 for body in b.bodies(t.owner):
                     if b.item_in(a.partition(".")[0], body) is not None:
                         fed.add(body)
+        fed |= {f"{case}#{i}" for case, i, _, tun in b.pass_refs if tun == t.name}
         if len(fed) < len(b.bodies(t.owner)):
             use_default.append(b.out_index.setdefault(t.name, len(b.out_index)))
 
@@ -1202,6 +1203,29 @@ def _ref_end(b: _Builder, end: str, labels: dict, w, edit: bool, at: int = 0):
 
 _BYNAME = {"Unbundle By Name": "unbundle", "Bundle By Name": "bundle"}
 _BYNAME_FIXED = {"input cluster", "output cluster", ""}
+
+
+def _plan_passes(b: _Builder, ref_wires: list, labels: dict, edit: bool) -> None:
+    """Case "pass" entries. vi_create wires the source straight to the output tunnel's terminal in
+    that frame (Terminal.Connect Wire; LabVIEW adds the input tunnel), as LabVIEW users draw it. Where
+    that cannot be done (vi_edit, a source a reference cannot name, an event structure around it) the
+    value goes through an Always Copy node in the frame instead: a wire from outside straight to an
+    output tunnel would land on the tunnel's outer side."""
+    for case, i, src, tun in b.case_passes:
+        sn = b.nodes.get(src.partition(".")[0])
+        direct = (not edit and sn is not None and sn.bind is None and b.nodes[case].bind is None
+                  and sn.kind in ("control", "function", "subvi", "constant", "shiftreg")
+                  and not b.event_frame(sn.name) and not b.event_frame(case)
+                  and b.item_in(sn.name, f"{case}#{i}") is None)
+        if direct:
+            b.pass_refs.append((case, i, src, tun))
+            ref_wires.append((_ref_end(b, src, labels, [src, tun], False, 0),
+                              ("tunframe", b.out_index.setdefault(tun, len(b.out_index)),
+                               b.out_index.setdefault(case, len(b.out_index)), i)))
+            continue
+        cp = f"_pass_{case}_{i}_{len(b.extra_wires)}"
+        b.add(cp, "function", f"{case}#{i}", {"name": cp, "function": "Always Copy"})
+        b.extra_wires += [[src, f"{cp}.Input"], [f"{cp}.Output", tun]]
 
 
 def _late_end(b: _Builder, end: str) -> bool:

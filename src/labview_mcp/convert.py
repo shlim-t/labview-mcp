@@ -295,13 +295,31 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
             bad("case: selector value used inside, selector unwired")
         else:
             edges.append((src, b))
+    def located(x: str) -> str:  # the diagram an end's node sits in ("case_3#1", a loop, or "")
+        n = nodes.get(x, {})
+        return n["structure"] if n.get("kind", "").startswith("shift_register") else n.get("in", "")
+
+    def inside(loc: str, frame: str) -> bool:
+        while loc:
+            if loc == frame:
+                return True
+            loc = nodes.get(loc.split("#")[0], {}).get("in", "")
+        return False
+
     wires = []
+    case_pass = collections.defaultdict(list)  # (case, frame index) -> [[source, output tunnel]]
     for a, b in edges:
         try:
-            wires.append([_map_end(a, nodes, sr_name, case_out, "source"),
-                          _map_end(b, nodes, sr_name, case_out, "sink")])
+            src, dst = _map_end(a, nodes, sr_name, case_out, "source"), _map_end(b, nodes, sr_name, case_out, "sink")
         except _Unsupported as e:
             bad(str(e))
+            continue
+        m = re.match(r"([^.]+)\.inner\[frame (\d+)\]$", b)
+        if m and m.group(1) in case_out and not inside(located(_end(a)[0]), f"{tunnels[m.group(1)]['structure']}#{m.group(2)}"):
+            # a value from outside the frame, passed on unchanged to the output tunnel
+            case_pass[(tunnels[m.group(1)]["structure"], int(m.group(2)))].append([src, dst])
+            continue
+        wires.append([src, dst])
 
     # -- growable nodes: size from the highest element[k] wired
     sizes = collections.defaultdict(int)
@@ -360,10 +378,13 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
                         bad("case: frame without a value")
                     if fr.get("default"):
                         entry["default"] = True
+                    if case_pass.get((st["name"], fr["index"])):
+                        entry["pass"] = case_pass[(st["name"], fr["index"])]
+                        features.add("case: value passed through a frame")
                     cases.append(entry)
                 st["cases"] = cases
-                outs = sorted({n for w in wires for n in w if n.startswith("t_")
-                               and nodes.get(n[2:], {}).get("structure") == st["name"]})
+                outs = sorted({n for w in wires + [p for v in case_pass.values() for p in v] for n in w
+                               if n.startswith("t_") and nodes.get(n[2:], {}).get("structure") == st["name"]})
                 if outs:
                     st["output_tunnels"] = outs
             elif st["type"] == "event":

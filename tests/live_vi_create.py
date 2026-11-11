@@ -303,6 +303,16 @@ CASES = {
         "wires": [["e1", "m.error in[1]"], ["e2", "m.error in[2]"], ["e3", "m.error in[3]"], ["e4", "m.error in[4]"],
                   ["m.error out", "eo"], ["f.First Call?: T/F", "fc"]],
     }, {}, {"merged": [True, 42, "boom"], "first": True}),
+    # a control used only to pass through one case frame (no input tunnel until the pass makes one)
+    "case_pass_outside": ({
+        "controls": [{"name": "sel", "type": "bool", "default": True},
+                     {"name": "name", "type": "string", "default": "kept"}],
+        "indicators": [{"name": "o", "type": "string", "label": "out"}],
+        "structures": [{"name": "C", "type": "case", "output_tunnels": ["t"], "cases": [
+            {"value": True, "pass": [["name", "t"]]},
+            {"value": False, "constants": [{"name": "k", "type": "string", "value": "other"}]}]}],
+        "wires": [["sel", "C.selector"], ["k", "t"], ["t", "o"]],
+    }, {}, {"out": "kept"}),
     # Static VI Reference pointed at a VI (strictly typed), its reference wired out of a loop into a
     # Property Node; a second, plain one beside it
     "static_vi_ref": ({

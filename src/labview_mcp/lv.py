@@ -809,6 +809,24 @@ class LabVIEW:
                     return r[4]
         raise LabVIEWError("wiring to a case tunnel from an event frame: its terminal was not found")
 
+    def _tunnel_inner_in_frame(self, target, tunnel, case, i: int, rows):
+        """The inner terminal of a case tunnel (given by its outer terminal) in frame i of the case."""
+        h = self._helper(FRAMEDIAGS_VI)
+        h.SetControlValue("reference", case)
+        self._run_checked(h, "reading a case structure's frames")
+        diags = [int(self._uid_of(d)) for d in h.GetControlValue("Diagrams[]") or ()]
+        if i >= len(diags):
+            raise LabVIEWError(f"passing a value through case frame {i}: the case has {len(diags)} frames")
+        tu = self._owners(target).get(self._uid_of(tunnel))  # Gen Script returns the outer terminal
+        diag = self._helper(TERMDIAG_VI)
+        for r in rows:
+            if r[1] == tu and r[3] == "InnerTerminal":
+                diag.SetControlValue("reference", r[4])
+                self._run_checked(diag, "reading a terminal's diagram")
+                if diag.GetControlValue("UID") == diags[i]:
+                    return r[4]
+        raise LabVIEWError(f"passing a value through case frame {i}: the tunnel has no terminal there")
+
     def _connect_through(self, target, es, j: int, i: int, a, z, outs: list, srs: dict) -> None:
         """Wire a -> z through frame i of event structure j (reference es): from the inner terminal of
         the input tunnel fed by a to the inner terminal of the output tunnel feeding z, in that frame."""
@@ -876,6 +894,8 @@ class LabVIEW:
         def term(end):
             if end[0] == "tun":  # ("tun", k, j): tunnel k's inner terminal where structure j sits
                 return self._tunnel_inner_by(target, outs[end[1]], outs[end[2]], rows)
+            if end[0] == "tunframe":  # ("tunframe", k, j, i): tunnel k's terminal in frame i of case j
+                return self._tunnel_inner_in_frame(target, outs[end[1]], outs[end[2]], end[3], rows)
             if end[0] == "sr":  # ("sr", k, element, "inner" | "outer")
                 _, k, e, side = end
                 cls = "InnerTerminal" if side == "inner" else "OuterTerminal"
