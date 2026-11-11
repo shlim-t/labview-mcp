@@ -424,10 +424,12 @@ class Script:
     # Static VI References: [(k, vi path or None, strict)]; pointed at their VI before anything is wired
     # (wires to them are drawn between terminal references: a script cannot name their terminal)
     static_refs: list = None
+    # Build Arrays to switch to Concatenate Inputs (indexes into outs), before anything is wired to them
+    concats: list = None
 
     def has_nodes(self) -> bool:
         return bool(self.pnodes) or bool(self.ref_wires) or bool(self.stacks) or bool(self.use_default) \
-            or bool(self.replaces) or bool(self.static_refs) or any(fr["script"] is not None and fr["script"].has_nodes()
+            or bool(self.replaces) or bool(self.static_refs) or bool(self.concats) or any(fr["script"] is not None and fr["script"].has_nodes()
                                         for ev in self.events or [] for fr in ev["frames"])
 
 
@@ -1030,6 +1032,16 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
                                 "structures, only")
             static_refs.append((b.out_index.setdefault(nm, len(b.out_index)), n.spec.get("_vi"),
                                 bool(n.spec.get("strict", False))))
+    concats = []  # Build Arrays set to Concatenate Inputs
+    for nm, n in b.nodes.items():
+        if n.kind == "function" and n.bind is None and "concatenate" in n.spec:
+            if str(n.spec.get("function", "")).strip() != "Build Array" or not isinstance(n.spec["concatenate"], bool):
+                raise SpecError(f"function {nm!r}: \"concatenate\" (true/false) belongs to a Build Array")
+            if n.spec["concatenate"]:
+                if edit or existing or b.event_frame(nm):
+                    raise SpecError(f"function {nm!r}: a concatenating Build Array is placed by vi_create, "
+                                    "outside event structures, only")
+                concats.append(b.out_index.setdefault(nm, len(b.out_index)))
     for nm in refs:  # objects whose references the caller wants back (in Script.outs order)
         b.out_index.setdefault(nm, len(b.out_index))
     if not edit and not existing and not any(n.kind not in ("control", "indicator") for n in b.nodes.values()):
@@ -1049,6 +1061,7 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
     vc_frame = {k: v for k, v in vc_frame.items() if v}
     spec_wires = [list(w) if isinstance(w, (list, tuple)) else w for w in spec.get("wires", []) or []]
     spec_wires += _byname_bridges(b, spec_wires)
+    ref_raw = []  # spec wires drawn between terminal references
     for w in spec_wires + b.extra_wires:
         if isinstance(w, dict):
             w = [w.get("from"), w.get("to")]
@@ -1060,6 +1073,7 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
             # (a Property/Invoke Node or By Name element to a shift register: the late script cannot
             # bind a shift register, so that wire too is drawn between terminal references)
             ref_wires.append(tuple(_ref_end(b, e, labels, w, edit or bool(existing), i) for i, e in enumerate(w)))
+            ref_raw.append(list(w))
             continue
         ends = (b.resolve(w[0]), b.resolve(w[1]))
         frames = {f for f in (b.event_frame(e.partition(".")[0]) for e in w) if f}
@@ -1080,7 +1094,7 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
         n.kind == "event" for n in b.nodes.values()) else []
     if events and (edit or existing):
         raise SpecError("event structures can only be made by vi_create for now")
-    pnodes, late, late_refs = _plan_nodes(b, late_raw, labels)
+    pnodes, late, late_refs = _plan_nodes(b, late_raw, labels, ref_raw)
 
     # a case output tunnel wired in only some frames gives its type's default in the others
     use_default = []
@@ -1141,6 +1155,7 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
         stacks=sorted((b.out_index[n], k) for n, k in b.sr_stack.items()),
         replaces=replaces,
         static_refs=static_refs,
+        concats=concats,
         use_default=use_default,
     )
 
@@ -1203,8 +1218,11 @@ def _ref_end(b: _Builder, end: str, labels: dict, w, edit: bool, at: int = 0):
                     f"function, subVI, constant, control or indicator, not to {node!r} (a {n.kind}) yet")
 
 
-_BYNAME = {"Unbundle By Name": "unbundle", "Bundle By Name": "bundle"}
-_BYNAME_FIXED = {"input cluster", "output cluster", ""}
+# nodes whose element terminals are chosen by name (Build Waveform / Get Waveform Components are
+# By Name nodes of the waveform's components)
+_BYNAME = {"Unbundle By Name": "unbundle", "Bundle By Name": "bundle",
+           "Get Waveform Components": "unbundle", "Build Waveform": "bundle"}
+_BYNAME_FIXED = {"input cluster", "output cluster", "waveform", "output waveform", ""}
 
 
 def _plan_passes(b: _Builder, ref_wires: list, labels: dict, edit: bool) -> None:
@@ -1234,9 +1252,9 @@ _GROWN_ELEMENT = re.compile(r"element\[\d+\]")
 
 
 def _byname_bridges(b: _Builder, wires: list) -> list:
-    """A By Name element wired to an element[k] of a Bundle / Build Array / Concatenate...: the late
-    script (which draws By Name element wires) cannot name a grown node's k-th element, so the value
-    goes through an Always Copy node next to the grown node. Rewrites those wires in `wires` in place
+    """A By Name element wired to an element[k] of a Bundle / Build Array / Concatenate... or to a
+    tunnel: the late script (which draws By Name element wires) cannot name a grown node's k-th
+    element or bind a tunnel, so the value goes through an Always Copy node. Rewrites those wires in `wires` in place
     and returns the wires to add."""
     extra = []
     for j, w in enumerate(wires):
@@ -1245,11 +1263,16 @@ def _byname_bridges(b: _Builder, wires: list) -> list:
         for a, z in ((0, 1), (1, 0)):
             node, _, term = w[z].partition(".")
             n = b.nodes.get(node)
-            if (_byname_elem(b, w[a]) and n is not None and n.kind == "function" and n.bind is None
-                    and str(n.spec.get("function", "")).strip() in _GROWABLE_FUNCS
-                    and _GROWN_ELEMENT.fullmatch(term)):
+            if not _byname_elem(b, w[a]) or n is None:
+                continue
+            grown = (n.kind == "function" and n.bind is None and _GROWN_ELEMENT.fullmatch(term)
+                     and str(n.spec.get("function", "")).strip() in _GROWABLE_FUNCS)
+            # nor bind a tunnel: the copy sits next to the By Name node, so the wire to the tunnel
+            # leaves from the same diagram
+            if grown or n.kind == "tunnel":
                 cp = f"_copy_{node}_{len(extra)}"
-                b.add(cp, "function", n.container, {"name": cp, "function": "Always Copy"})
+                where = n.container if grown else b.nodes[w[a].partition(".")[0]].container
+                b.add(cp, "function", where, {"name": cp, "function": "Always Copy"})
                 if a == 0:  # By Name element -> grown node
                     wires[j], more = [w[0], f"{cp}.Input"], [f"{cp}.Output", w[1]]
                 else:
@@ -1274,7 +1297,7 @@ def _byname_elem(b: _Builder, end: str) -> bool:
             and str(n.spec.get("function", "")).strip() in _BYNAME and term not in _BYNAME_FIXED)
 
 
-def _plan_nodes(b: _Builder, late_raw: list, labels: dict):
+def _plan_nodes(b: _Builder, late_raw: list, labels: dict, ref_raw: list = ()):
     """Property/Invoke Nodes of this script (not those in event frames: their frame's script has them)
     and the script that wires them once configured."""
     pnodes = []
@@ -1289,7 +1312,7 @@ def _plan_nodes(b: _Builder, late_raw: list, labels: dict):
         pnodes.append({"name": name, "out": out, "kind": n.kind, "class": s.get("class"), "items": items,
                        "write": write, "control": s.get("control"), "method": s.get("method")})
     elems: dict[str, list] = {}  # By Name node -> its element names, in wire order
-    for w in late_raw:
+    for w in list(late_raw) + list(ref_raw):  # (By Name elements wired by reference need showing too)
         for e in w:
             if _byname_elem(b, e):
                 node, _, term = e.partition(".")
@@ -1306,6 +1329,8 @@ def _plan_nodes(b: _Builder, late_raw: list, labels: dict):
             names = list(given)
         pnodes.append({"name": name, "out": b.out_index.setdefault(name, len(b.out_index)), "kind": "byname",
                        "function": _BYNAME[n.spec["function"].strip()], "items": names, "write": [],
+                       # Build Waveform's InputCnt also counts its waveform input
+                       "count": len(names) + (n.spec["function"].strip() == "Build Waveform"),
                        "control": None, "class": None, "method": None})
     if not late_raw:
         return pnodes, None, None

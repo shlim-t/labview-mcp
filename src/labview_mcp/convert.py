@@ -140,6 +140,9 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
                     f["vi"] = n["path"]
                     if n.get("strict"):
                         f["strict"] = True
+                if fn == "Build Array" and n.get("concatenate"):
+                    features.add("concatenating Build Array")
+                    f["concatenate"] = True
                 contents[where]["functions"].append(f)
             elif k == "subvi":
                 if not n.get("path"):

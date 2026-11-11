@@ -15,23 +15,20 @@ from typing import Any
 
 
 def c_string_bytes(s: str) -> bytes:
-    """Decode the body of C string literals (octal and simple escapes) to bytes."""
+    """Decode the body of LabVIEW's C string literals to bytes. LabVIEW writes every special byte as
+    an octal escape (\\012, \\042 for a quote) and a backslash byte as itself, unescaped: a backslash
+    not followed by an octal digit is the byte 0x5C and does not escape the next character
+    ("\\\\217" is 0x5C 0x8F, "\\(" is 0x5C 0x28)."""
     out = bytearray()
     i, n = 0, len(s)
-    esc = {"n": 10, "t": 9, "r": 13, "\\": 92, '"': 34, "'": 39, "?": 63, "a": 7, "b": 8, "f": 12, "v": 11}
     while i < n:
         c = s[i]
-        if c == "\\" and i + 1 < n:
-            d = s[i + 1]
-            if d in "01234567":
-                j = i + 1
-                while j < n and j < i + 4 and s[j] in "01234567":
-                    j += 1
-                out.append(int(s[i + 1:j], 8) & 0xFF)
-                i = j
-                continue
-            out.append(esc.get(d, ord(d) & 0xFF))
-            i += 2
+        if c == "\\" and i + 1 < n and s[i + 1] in "01234567":
+            j = i + 1
+            while j < n and j < i + 4 and s[j] in "01234567":
+                j += 1
+            out.append(int(s[i + 1:j], 8) & 0xFF)
+            i = j
             continue
         out.append(ord(c) & 0xFF)
         i += 1
@@ -117,6 +114,8 @@ class TypeTable:
         else:
             td["kind"] = f"type_0x{code:02x}"
             td["raw"] = body.hex()
+            if code == 0x54 and body[:2] == b"\x06\x00":  # a time stamp: subtype word, then its name
+                at = 2
         td["name"] = self._name(body, at) if named and at is not None else ""
         return td
 
@@ -261,9 +260,28 @@ def refnum_type(body: bytes, endian: str):
 _ERROR_ELEMENTS = ["status", "code", "source"]
 
 
+# An analog waveform's components by their cluster element in DFIR (measured on LabVIEW 2026: Build
+# Waveform / Get Waveform Components come through DFIR as a (Un)Bundle of these elements)
+_WAVEFORM_ELEMENTS = {0: "t0", 5: "dt", 6: "Y", 7: "error", 11: "attributes"}
+# measure-data subtypes (first word of a 0x54 type) known to be analog waveforms: Waveform(DBL)
+_ANALOG_WAVEFORMS = {3}
+
+
+def _waveform_node(n: dict, vec: list[int] | None) -> str | None:
+    """"Build Waveform" / "Get Waveform Components" for a DFIR (Un)Bundle of an analog waveform."""
+    ct = n.get("_ctype")
+    if not vec or not isinstance(ct, str) or not ct.startswith("type_0x54:") or not set(vec) <= set(_WAVEFORM_ELEMENTS):
+        return None
+    if int(ct.split(":")[1]) not in _ANALOG_WAVEFORMS:
+        return None
+    return "Get Waveform Components" if n["class"] == "UnbundleNode" else "Build Waveform"
+
+
 def _by_name(n: dict, vec: list[int] | None) -> list[str] | None:
     """The element names an (Un)Bundle By Name uses, when DFIR's (Un)Bundle takes elements out of
     order or skips some (element list not 0, 1, 2...) and each one has a name; else None."""
+    if _waveform_node(n, vec):
+        return [_WAVEFORM_ELEMENTS[i] for i in vec]
     if not vec or vec == list(range(len(vec))):
         return None
     ct = n.get("_ctype")
@@ -318,7 +336,9 @@ def parse(text: str, catalog: dict[str, list[str]] | None = None, subvi_terms=No
     """subvi_terms(path) -> the subVI's connector-pane labels in DFIR terminal order, or None."""
     catalog = catalog or {}
     m = re.search(r"const char \w+\[\] =\s*(.*?\");\s", text, re.S)
-    blob = c_string_bytes("".join(re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(1)))) if m else b""
+    # a quote inside a literal is always \042, so a literal ends at the next quote (even after a
+    # backslash, which is a plain byte)
+    blob = c_string_bytes("".join(re.findall(r'"([^"]*)"', m.group(1)))) if m else b""
 
     def tdr(o, ln):
         try:
@@ -427,9 +447,16 @@ def parse(text: str, catalog: dict[str, list[str]] | None = None, subvi_terms=No
                     node["function"] = name or ccls
                     if name:
                         node["_labels"] = [x for x in catalog.get(name, []) if x != "..."]
+                    if ccls == "BuildArrayNode" and re.match(r"[\s,]*\d+\s*,\s*true\b", rest):
+                        node["concatenate"] = True  # Create(diagram, inputs, concatenate, ...)
                     if ccls in ("UnbundleNode", "BundleNode"):
                         tt = _TDR.findall(rest)
                         node["_ctype"] = type_of(*tt[0]) if tt else None
+                        if node["_ctype"] == "type_0x54":  # measure data: which kind (waveform, ...)
+                            t_, r_ = tdr(*tt[0])
+                            raw = t_.tds[r_].get("raw", "") if t_ is not None and r_ is not None else ""
+                            node["_ctype"] = (f"type_0x54:{int.from_bytes(bytes.fromhex(raw[:4]), 'little')}"
+                                              if len(raw) >= 4 else "type_0x54")
                 nodes[ref] = node
                 order.append(ref)
                 continue
@@ -510,8 +537,13 @@ def parse(text: str, catalog: dict[str, list[str]] | None = None, subvi_terms=No
             # Bundle / Unbundle By Name come through DFIR as (Un)Bundles of only the elements they name.
             vec = elem_vec.get(ref)
             names = _by_name(n, vec)
+            wf = _waveform_node(n, vec)
             if names:  # a Bundle / Unbundle By Name, which DFIR gives as a (Un)Bundle of some elements
-                n["_byname"] = "Unbundle By Name" if n["class"] == "UnbundleNode" else "Bundle By Name"
+                n["_byname"] = wf or ("Unbundle By Name" if n["class"] == "UnbundleNode" else "Bundle By Name")
+                if wf:
+                    fixed = ["waveform", "output waveform"] if n["class"] == "BundleNode" else ["waveform"]
+                    return f"{n['id']}." + (fixed[t] if t < len(fixed) else names[t - len(fixed)]
+                                            if t - len(fixed) < len(names) else f"element[{t}]")
                 if n["class"] == "BundleNode":
                     return f"{n['id']}." + ("input cluster" if t == 0 else "output cluster" if t == 1
                                             else names[t - 2] if t - 2 < len(names) else f"element[{t - 1}]")

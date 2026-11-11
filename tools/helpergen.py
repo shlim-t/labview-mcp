@@ -438,6 +438,13 @@ def _elemnames_helper(cls: str, cnt: str) -> dict:
 
 HELPERS["lvmcp_unbnames"] = _elemnames_helper("NamedUnbundler", "OutputCnt")
 HELPERS["lvmcp_bunnames"] = _elemnames_helper("NamedBundler", "InputCnt")
+# BuildArray.Concatenate Inputs (write): a Build Array that concatenates its array inputs
+HELPERS["lvmcp_concat"] = {
+    "controls": [("reference", "ref:BuildArray"), ("concatenate", "bool")],
+    "indicators": [("error out", "error")],
+    "nodes": [{"name": "w", "kind": "property", "class": "BuildArray", "items": ["ConcatInputs"], "write": True}],
+    "wires": [("reference", "w.reference"), ("concatenate", "w.ConcatInputs"), ("w.error out", "error out")],
+}
 # MultiFrameStructure.Remove Frame
 HELPERS["lvmcp_removeframe"] = {
     "controls": [("reference", "ref:MultiFrameStructure"), ("Frame Index", "i32")],
@@ -630,7 +637,7 @@ ORDER = ["lvmcp_move", "lvmcp_propwrite", "lvmcp_proplink", "lvmcp_invokelink", 
          "lvmcp_allprops", "lvmcp_signal", "lvmcp_fire", "lvmcp_timeoutterm", "lvmcp_eventsel", "lvmcp_termconst", "lvmcp_outcnt", "lvmcp_consttype", "lvmcp_ctltype", "lvmcp_termind", "lvmcp_termctl", "lvmcp_conpane", "lvmcp_subvipath", "lvmcp_relabel", "lvmcp_constvalue",
          "lvmcp_rep", "lvmcp_constrep", "lvmcp_casenames", "lvmcp_setcasenames",
          "lvmcp_removeframe", "lvmcp_setpos", "lvmcp_autoerr", "lvmcp_pnodeinfo", "lvmcp_inodeinfo", "lvmcp_propitemset", "lvmcp_propitems", "lvmcp_itemterm",
-         "lvmcp_unbnames", "lvmcp_bunnames", "lvmcp_connect"]
+         "lvmcp_unbnames", "lvmcp_bunnames", "lvmcp_connect", "lvmcp_concat"]
 
 
 def main(args: list[str]) -> None:

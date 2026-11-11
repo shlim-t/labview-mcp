@@ -360,6 +360,34 @@ CASES = {
                   ["u.x", "ba.element[1]"], ["ia.element", "ba.element[2]"], ["ba.appended array", "arr"],
                   ["u.k", "bu.element[2]"], ["u.x", "bu.element[3]"], ["bu.output cluster", "o"]],
     }, {}, {"picked": 6.0, "built": [2.5, 6.0], "bundled": [1, 2.5]}),
+    # Build Waveform / Get Waveform Components choose their components by name; Build Waveform's
+    # time stamp comes from a terminal a script cannot name (wired by reference)
+    "waveform_components": ({
+        "controls": [{"name": "dt", "type": "dbl", "default": 0.25}, {"name": "y", "type": "dbl[]", "default": [1, 2, 3]}],
+        "indicators": [{"name": "yo", "type": "dbl[]"}, {"name": "dto", "type": "dbl"}],
+        "functions": [{"name": "now", "function": "Get Date/Time In Seconds"},
+                      {"name": "bw", "function": "Build Waveform"}, {"name": "gw", "function": "Get Waveform Components"},
+                      {"name": "keep", "function": "Always Copy"}],
+        "wires": [["now.seconds since 1Jan1904", "bw.t0"], ["dt", "bw.dt"], ["y", "bw.Y"],
+                  ["bw.output waveform", "gw.waveform"], ["gw.Y", "yo"], ["gw.dt", "dto"], ["gw.t0", "keep.Input"]],
+    }, {}, {"yo": [1.0, 2.0, 3.0], "dto": 0.25}),
+    # a Build Array set to Concatenate Inputs joins two arrays into one 1-D array
+    "build_array_concatenate": ({
+        "controls": [{"name": "a", "type": "dbl[]", "default": [1, 2]}, {"name": "b", "type": "dbl[]", "default": [3]}],
+        "indicators": [{"name": "o", "type": "dbl[]"}],
+        "functions": [{"name": "ba", "function": "Build Array", "size": 2, "concatenate": True}],
+        "wires": [["a", "ba.element[1]"], ["b", "ba.element[2]"], ["ba.appended array", "o"]],
+    }, {}, {"o": [1.0, 2.0, 3.0]}),
+    # a By Name element wired to a case output tunnel goes through an Always Copy node
+    "by_name_to_tunnel": ({
+        "controls": [{"name": "c", "type": {"cluster": [{"name": "x", "type": "dbl"}, {"name": "k", "type": "i32"}]},
+                      "default": [2.5, 3]}, {"name": "on", "type": "bool", "default": True}],
+        "indicators": [{"name": "o", "type": "i32"}],
+        "structures": [{"name": "C", "type": "case", "output_tunnels": ["t"], "cases": [
+            {"value": True, "functions": [{"name": "u", "function": "Unbundle By Name"}]},
+            {"value": False, "constants": [{"name": "z", "type": "i32", "value": 0}]}]}],
+        "wires": [["on", "C.selector"], ["c", "u.input cluster"], ["u.k", "t"], ["z", "t"], ["t", "o"]],
+    }, {}, {"o": 3}),
     # an unwired error (Not a Refnum into a Property Node) must not open LabVIEW's automatic error
     # dialog, which would block LabVIEW and hang this run
     "no_error_dialog": ({

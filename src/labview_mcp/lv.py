@@ -466,6 +466,8 @@ class LabVIEW:
                 self._replace_functions(target, script.replaces, out_refs)
             if script.static_refs:
                 self._point_static_refs(target, script.static_refs, out_refs)
+            if script.concats:
+                self._concatenate(target, script.concats, out_refs)
             srs = self._stack_shift_registers(target, script.stacks, out_refs) if script.stacks else {}
             if script.ref_wires:
                 self._connect_by_ref(target, script.ref_wires, out_refs, srs)
@@ -568,7 +570,7 @@ class LabVIEW:
             if pn["kind"] == "byname":  # Bundle / Unbundle By Name: which elements it shows
                 h = self._helper(UNBNAMES_VI if pn["function"] == "unbundle" else BUNNAMES_VI)
                 h.SetControlValue("reference", ref)
-                h.SetControlValue("count", len(pn["items"]))
+                h.SetControlValue("count", pn.get("count", len(pn["items"])))
                 h.SetControlValue("names", list(pn["items"]))
                 self._run_checked(h, f"choosing the elements {pn['items']} of {pn['name']!r} (are they names "
                                      "of the wired cluster's elements?)")
@@ -750,6 +752,17 @@ class LabVIEW:
             svr.SetControlValue("path", path)
             svr.SetControlValue("strict", bool(strict))
             self._run_checked(svr, f"pointing a Static VI Reference at {path}")
+
+    def _concatenate(self, target, concats: list, outs: list) -> None:
+        """Switch placed Build Arrays to Concatenate Inputs."""
+        h, all_refs = self._helper(CONCAT_VI), self._all_of(target, "BuildArray")
+        for k in concats:
+            ref = all_refs.get(self._uid_of(outs[k]))
+            if ref is None:
+                raise LabVIEWError("a Build Array was not found on the diagram")
+            h.SetControlValue("reference", ref)
+            h.SetControlValue("concatenate", True)
+            self._run_checked(h, "setting a Build Array to Concatenate Inputs")
 
     def _owners(self, target) -> dict:
         """{uid: owner uid} of every block-diagram object."""
@@ -2230,7 +2243,8 @@ class LabVIEW:
         from . import catalog
         labels_of = catalog.load(self.app.ApplicationDirectory)
         funcs = {n["id"]: n for n in g["nodes"] if n["kind"] == "function" and n.get("function")
-                 and n["function"] not in ("Unbundle By Name", "Bundle By Name")}  # element names are the cluster's
+                 and n["function"] not in ("Unbundle By Name", "Bundle By Name",
+                                       "Build Waveform", "Get Waveform Components")}  # element names are the cluster's
         used: dict[str, dict[str, bool]] = {}  # node -> wired label -> is an output
         for w in g["wires"]:
             for e, is_out in [(w.get("from"), True)] + [(t, False) for t in w["to"]]:
@@ -2630,6 +2644,7 @@ CASESELECTOR_VI = VIS_DIR / "lvmcp_caseselector.vi"
 USEDEFAULT_VI = VIS_DIR / "lvmcp_usedefault.vi"
 INPUTCNT_VI = VIS_DIR / "lvmcp_inputcnt.vi"
 STATICVI_VI = VIS_DIR / "lvmcp_staticvi.vi"
+CONCAT_VI = VIS_DIR / "lvmcp_concat.vi"
 STATICVIINFO_VI = VIS_DIR / "lvmcp_staticviinfo.vi"
 
 
