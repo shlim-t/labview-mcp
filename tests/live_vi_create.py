@@ -345,6 +345,21 @@ CASES = {
         "wires": [["c", "u.input cluster"], ["u.gamma", "g"], ["u.alpha", "a"],
                   ["c", "b.input cluster"], ["s", "b.beta"], ["b.output cluster", "o"]],
     }, {}, {"gamma out": 7, "alpha out": 1.5, "out": [1.5, "new", 7]}),
+    # By Name elements into a 1-D Index Array's index (named "index" once its array is wired) and into
+    # grown Build Array / Bundle elements
+    "by_name_into_functions": ({
+        "controls": [{"name": "c", "type": {"cluster": [{"name": "x", "type": "dbl"}, {"name": "k", "type": "i32"}]},
+                      "default": [2.5, 1]},
+                     {"name": "a", "type": "dbl[]", "default": [5, 6, 7]}],
+        "indicators": [{"name": "e", "type": "dbl", "label": "picked"}, {"name": "arr", "type": "dbl[]", "label": "built"},
+                       {"name": "o", "type": {"cluster": [{"name": "k", "type": "i32"}, {"name": "x", "type": "dbl"}]},
+                        "label": "bundled"}],
+        "functions": [{"name": "u", "function": "Unbundle By Name"}, {"name": "ia", "function": "Index Array"},
+                      {"name": "ba", "function": "Build Array", "size": 2}, {"name": "bu", "function": "Bundle", "size": 2}],
+        "wires": [["c", "u.input cluster"], ["a", "ia.array"], ["u.k", "ia.index"], ["ia.element", "e"],
+                  ["u.x", "ba.element[1]"], ["ia.element", "ba.element[2]"], ["ba.appended array", "arr"],
+                  ["u.k", "bu.element[2]"], ["u.x", "bu.element[3]"], ["bu.output cluster", "o"]],
+    }, {}, {"picked": 6.0, "built": [2.5, 6.0], "bundled": [1, 2.5]}),
     # an unwired error (Not a Refnum into a Property Node) must not open LabVIEW's automatic error
     # dialog, which would block LabVIEW and hang this run
     "no_error_dialog": ({
@@ -514,7 +529,52 @@ def broken_errors():
     return problems
 
 
-CHECKS = {"broken_errors": broken_errors}
+def dfir_roundtrip():
+    """Read a VI (vi_dump, DFIR reader), convert it to a spec and rebuild it: the copy must run and
+    give the same outputs. Covers case values the DFIR reader numbers (Boolean 0/1 from a function,
+    error cluster 0/1) and an Unbundle By Name, which DFIR gives as an Unbundle of only the named
+    elements (here "code", cluster element 2)."""
+    from labview_mcp import convert, catalog
+    src, dst = os.path.join(D, "rt_source.vi"), os.path.join(D, "rt_copy.vi")
+    spec = {
+        "controls": [{"name": "e", "type": "error", "label": "error in"},
+                     {"name": "x", "type": "dbl", "label": "x"}, {"name": "y", "type": "dbl", "label": "y"}],
+        "indicators": [{"name": "m", "type": "string", "label": "msg"}, {"name": "b", "type": "string", "label": "big"}],
+        "functions": [{"name": "gt", "function": "Greater?"}],
+        "structures": [
+            {"name": "C", "type": "case", "output_tunnels": ["t"], "cases": [
+                {"value": "No Error", "default": True, "constants": [{"name": "ok", "type": "string", "value": "ok"}]},
+                {"value": "Error", "functions": [{"name": "u", "function": "Unbundle By Name"}],
+                 "structures": [{"name": "K", "type": "case", "output_tunnels": ["t2"], "cases": [
+                     {"default": True, "constants": [{"name": "o", "type": "string", "value": "other"}]},
+                     {"value": 56, "constants": [{"name": "to", "type": "string", "value": "timeout"}]}]}]}]},
+            {"name": "B", "type": "case", "output_tunnels": ["tb"], "cases": [
+                {"value": True, "constants": [{"name": "yes", "type": "string", "value": "yes"}]},
+                {"value": False, "default": True, "constants": [{"name": "no", "type": "string", "value": "no"}]}]}],
+        "wires": [["e", "C.selector"], ["ok", "t"], ["e", "u.input cluster"], ["u.code", "K.selector"],
+                  ["o", "t2"], ["to", "t2"], ["t2", "t"], ["t", "m"],
+                  ["x", "gt.x"], ["y", "gt.y"], ["gt.x > y?", "B.selector"], ["yes", "tb"], ["no", "tb"], ["tb", "b"]],
+    }
+    lv.call(lv.vi_create, src, spec, False, "").result()
+    g = lv.call(lv.vi_dump, src).result()
+    copy, unsupported, _ = convert.to_spec(g, catalog.load(lv.call(lambda: lv.app.ApplicationDirectory).result()))
+    if unsupported:
+        return [f"converter: {unsupported}"]
+    res = lv.call(lv.vi_create, dst, copy, True, "").result()
+    if res["exec_state"].startswith("bad"):
+        return [f"copy is broken: {res.get('errors')}"]
+    problems = []
+    for inputs, want in (({"error in": [True, 56, "t"], "x": 2.0, "y": 1.0}, {"msg": "timeout", "big": "yes"}),
+                         ({"error in": [True, 7, "t"], "x": 0.0, "y": 1.0}, {"msg": "other", "big": "no"}),
+                         ({"error in": [False, 0, ""], "x": 1.0, "y": 1.0}, {"msg": "ok", "big": "no"})):
+        for p in (src, dst):
+            got = lv.call(lv.vi_run, p, inputs, list(want), 10).result()["values"]
+            if got != want:
+                problems.append(f"{os.path.basename(p)} {inputs}: {got}, expected {want}")
+    return problems
+
+
+CHECKS = {"broken_errors": broken_errors, "dfir_roundtrip": dfir_roundtrip}
 names = sys.argv[1:] or list(CASES) + list(UI_CASES) + list(CHECKS)
 failed = 0
 for name in names:

@@ -1047,7 +1047,9 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
                         and b.nodes[fr["control"]].kind == "control"):
                     vc_frame[fr["control"]] = None if fr["control"] in vc_frame else f"{n.name}#{i}"
     vc_frame = {k: v for k, v in vc_frame.items() if v}
-    for w in list(spec.get("wires", []) or []) + b.extra_wires:
+    spec_wires = [list(w) if isinstance(w, (list, tuple)) else w for w in spec.get("wires", []) or []]
+    spec_wires += _byname_bridges(b, spec_wires)
+    for w in spec_wires + b.extra_wires:
         if isinstance(w, dict):
             w = [w.get("from"), w.get("to")]
         if not (isinstance(w, (list, tuple)) and len(w) == 2 and all(isinstance(x, str) for x in w)):
@@ -1226,6 +1228,35 @@ def _plan_passes(b: _Builder, ref_wires: list, labels: dict, edit: bool) -> None
         cp = f"_pass_{case}_{i}_{len(b.extra_wires)}"
         b.add(cp, "function", f"{case}#{i}", {"name": cp, "function": "Always Copy"})
         b.extra_wires += [[src, f"{cp}.Input"], [f"{cp}.Output", tun]]
+
+
+_GROWN_ELEMENT = re.compile(r"element\[\d+\]")
+
+
+def _byname_bridges(b: _Builder, wires: list) -> list:
+    """A By Name element wired to an element[k] of a Bundle / Build Array / Concatenate...: the late
+    script (which draws By Name element wires) cannot name a grown node's k-th element, so the value
+    goes through an Always Copy node next to the grown node. Rewrites those wires in `wires` in place
+    and returns the wires to add."""
+    extra = []
+    for j, w in enumerate(wires):
+        if not (isinstance(w, (list, tuple)) and len(w) == 2 and all(isinstance(x, str) for x in w)):
+            continue
+        for a, z in ((0, 1), (1, 0)):
+            node, _, term = w[z].partition(".")
+            n = b.nodes.get(node)
+            if (_byname_elem(b, w[a]) and n is not None and n.kind == "function" and n.bind is None
+                    and str(n.spec.get("function", "")).strip() in _GROWABLE_FUNCS
+                    and _GROWN_ELEMENT.fullmatch(term)):
+                cp = f"_copy_{node}_{len(extra)}"
+                b.add(cp, "function", n.container, {"name": cp, "function": "Always Copy"})
+                if a == 0:  # By Name element -> grown node
+                    wires[j], more = [w[0], f"{cp}.Input"], [f"{cp}.Output", w[1]]
+                else:
+                    wires[j], more = [f"{cp}.Output", w[1]], [w[0], f"{cp}.Input"]
+                extra.append(more)
+                break
+    return extra
 
 
 def _late_end(b: _Builder, end: str) -> bool:

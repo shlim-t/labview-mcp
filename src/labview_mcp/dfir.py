@@ -258,6 +258,29 @@ def refnum_type(body: bytes, endian: str):
     return out
 
 
+_ERROR_ELEMENTS = ["status", "code", "source"]
+
+
+def _by_name(n: dict, vec: list[int] | None) -> list[str] | None:
+    """The element names an (Un)Bundle By Name uses, when DFIR's (Un)Bundle takes elements out of
+    order or skips some (element list not 0, 1, 2...) and each one has a name; else None."""
+    if not vec or vec == list(range(len(vec))):
+        return None
+    ct = n.get("_ctype")
+    if ct == "error":
+        return [_ERROR_ELEMENTS[i] for i in vec] if max(vec) < 3 else None
+    if not (isinstance(ct, dict) and "cluster" in ct):
+        return None
+    els = ct["cluster"]
+    if len(els) > max(vec):         # the whole cluster
+        names = [els[i]["name"] for i in vec]
+    elif len(els) == len(vec):      # just the elements the node uses
+        names = [e["name"] for e in els]
+    else:
+        return None
+    return names if all(names) and len(set(names)) == len(names) else None
+
+
 def _short(ref: str) -> str:
     """controlRef_2 -> control_2, addPrimitiveRef_12 -> add_12."""
     m = re.match(r"(\w+?)(?:Primitive)?Ref_(\d+)$", ref)
@@ -332,7 +355,12 @@ def parse(text: str, catalog: dict[str, list[str]] | None = None, subvi_terms=No
     selector_owner: dict[str, str] = {}
     border: dict[str, list[str]] = {}    # structure ref -> tunnels / shift registers, creation order
 
+    elem_vec: dict[str, list[int]] = {}  # (un)bundle ref -> the cluster element (0-based) of each element terminal
     for st in stmts:
+        em = re.match(r"\s*(\w+)_elementVec\.push_back\(DFIR::ClusterElement\((\d+)\)\)", st)
+        if em:
+            elem_vec.setdefault(em.group(1), []).append(int(em.group(2)))
+            continue
         cm = _CONN.search(st)
         if cm:
             conns.append(cm.groups())
@@ -399,6 +427,9 @@ def parse(text: str, catalog: dict[str, list[str]] | None = None, subvi_terms=No
                     node["function"] = name or ccls
                     if name:
                         node["_labels"] = [x for x in catalog.get(name, []) if x != "..."]
+                    if ccls in ("UnbundleNode", "BundleNode"):
+                        tt = _TDR.findall(rest)
+                        node["_ctype"] = type_of(*tt[0]) if tt else None
                 nodes[ref] = node
                 order.append(ref)
                 continue
@@ -475,6 +506,17 @@ def parse(text: str, catalog: dict[str, list[str]] | None = None, subvi_terms=No
             return f"{n['id']}.{labels[t]}"
         if n.get("class") in _GROWABLE:
             # vi_dump's element[k] is the k-th element terminal (1-based), as the scan reader names it
+            # An (Un)Bundle lists the cluster element behind each element terminal (elementVec):
+            # Bundle / Unbundle By Name come through DFIR as (Un)Bundles of only the elements they name.
+            vec = elem_vec.get(ref)
+            names = _by_name(n, vec)
+            if names:  # a Bundle / Unbundle By Name, which DFIR gives as a (Un)Bundle of some elements
+                n["_byname"] = "Unbundle By Name" if n["class"] == "UnbundleNode" else "Bundle By Name"
+                if n["class"] == "BundleNode":
+                    return f"{n['id']}." + ("input cluster" if t == 0 else "output cluster" if t == 1
+                                            else names[t - 2] if t - 2 < len(names) else f"element[{t - 1}]")
+                return f"{n['id']}." + ("input cluster" if t == 0 else names[t - 1] if t - 1 < len(names)
+                                        else f"element[{t}]")
             if n["class"] == "BundleNode":
                 return f"{n['id']}." + ("cluster" if t == 0 else "output cluster" if t == 1 else f"element[{t - 1}]")
             if t == 0:
@@ -544,6 +586,8 @@ def parse(text: str, catalog: dict[str, list[str]] | None = None, subvi_terms=No
         elif dst in wires and src:
             e = edges.setdefault(dst, {"from": None, "to": [], "type": None, "uid": wires[dst]["uid"]})
             e["from"] = term_name(src, st_)
+            if e["from"].endswith(".selector") and nodes.get(src, {}).get("kind") in ("structure_terminal", "case"):
+                e["from"] += " (inside)"  # a selector feeds wires only inside its frames, as the scan reader names it
             e["type"] = type_of(o, ln)
         elif src and not dst:
             pass  # unwired output
@@ -556,6 +600,9 @@ def parse(text: str, catalog: dict[str, list[str]] | None = None, subvi_terms=No
         n.pop("_labels", None)
         n.pop("_nterms", None)
         n.pop("_owner", None)
+        n.pop("_ctype", None)
+        if n.get("_byname"):  # set while naming terminals; the function name is read there too
+            n["function"] = n.pop("_byname")
         n.pop("class", None) if n.get("kind") in ("control", "indicator", "constant") else None
         if not n.get("in"):
             n.pop("in", None)

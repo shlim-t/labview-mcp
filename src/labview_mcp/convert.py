@@ -196,6 +196,8 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
 
     # -- wires as (source end, sink end) pairs, then through tunnels
     edges = [(w["from"], s) for w in g["wires"] for s in w["to"] if w.get("from") and s]
+    sel_wire_type = {s[:-len(".selector")]: w.get("type") for w in g["wires"] for s in w["to"]
+                     if s.endswith(".selector")}
     if any(not w.get("from") for w in g["wires"]):
         bad("wire: source unknown")
     def direction(tid, t):  # the scan reader gives none: an input tunnel is wired into on the outside
@@ -369,7 +371,7 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
                 cases = []
                 for fr in st.pop("_frames"):
                     entry = fill(f"{st['name']}#{fr['index']}")
-                    value = _frame_value(fr, st["name"], wires, nodes)
+                    value = _frame_value(fr, _selector_kind(st["name"], wires, nodes, sel_wire_type))
                     if value is not None:
                         entry["value"] = value
                         if isinstance(value, str) and (", " in value or ".." in value):
@@ -508,7 +510,25 @@ def _event_frame(fr: dict, es: str, entry: dict, own: dict, timeout, label_id: d
     return entry
 
 
-def _frame_value(fr: dict, case: str, wires, nodes):
+def _selector_kind(case: str, wires, nodes, wire_types: dict) -> str | None:
+    """What a case selector takes: "bool", "error", "string", "enum" or None (a number / unknown).
+    From the type of the wire into the selector, else the type of the control feeding it, else a
+    source terminal named like LabVIEW's Boolean outputs ("x > y?") -- the DFIR reader cannot name
+    the type of some polymorphic outputs (And, Or, Empty Array?)."""
+    sel = next((a for a, b in wires if b == f"{case}.selector"), None)
+    for t in (wire_types.get(case), nodes.get(sel.partition(".")[0], {}).get("type") if sel else None):
+        if isinstance(t, dict) and "enum" in t:
+            return "enum"
+        if t in ("bool", "error", "string"):
+            return t
+        if isinstance(t, str) and t not in ("?",) and not t.startswith("type_"):
+            return None
+    if sel and sel.endswith("?"):
+        return "bool"
+    return None
+
+
+def _frame_value(fr: dict, kind: str | None):
     """A case frame's selector value(s) in vi_create form: a number / bool / string for one value,
     else LabVIEW's case-name text ("1..3, 5", '"a", "b"'). From the scan reader's frame "name"
     (LabVIEW's own text) or the DFIR reader's "values" ("lo, hi" is a range)."""
@@ -518,15 +538,14 @@ def _frame_value(fr: dict, case: str, wires, nodes):
         if not parts:
             return None
         if len(parts) == 1 and ".." not in parts[0]:
-            return _case_value(parts[0].strip('"'), case, wires, nodes)
+            return _case_value(parts[0].strip('"'), kind)
         return text
     vals = fr.get("values", [])
     if not vals:
         return None
-    sel = next((a for a, b in wires if b == f"{case}.selector"), None)
-    is_str = (nodes.get(sel.partition(".")[0], {}).get("type") if sel else None) == "string"
+    is_str = kind == "string"
     if len(vals) == 1 and "," not in vals[0]:
-        return _case_value(vals[0], case, wires, nodes)
+        return _case_value(vals[0], kind)
     out = []
     for v in vals:
         lo, sep, hi = v.partition(", ")
@@ -543,12 +562,14 @@ def _frame_value(fr: dict, case: str, wires, nodes):
     return ", ".join(out)
 
 
-def _case_value(v: str, case: str, wires, nodes):
-    sel = next((a for a, b in wires if b == f"{case}.selector"), None)
-    t = nodes.get(sel.partition(".")[0], {}).get("type") if sel else None
-    if t == "bool":
+def _case_value(v: str, kind: str | None):
+    """One selector value. The DFIR reader numbers Boolean frames 0 (False) / 1 (True) and error
+    cluster frames 0 (No Error) / 1 (Error)."""
+    if kind == "bool":
         return v not in ("0", "False", "false")
-    if re.fullmatch(r"-?\d+", v) and t != "string":
+    if kind == "error" and v in ("0", "1"):
+        return "Error" if v == "1" else "No Error"
+    if re.fullmatch(r"-?\d+", v) and kind not in ("string", "enum"):
         return int(v)
     return v
 

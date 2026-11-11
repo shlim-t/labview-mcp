@@ -649,6 +649,16 @@ class LabVIEW:
                     if labels.get(nm) in script.styles and labels[nm] in fp:
                         refs[i] = fp[labels[nm]]
             late = script.late
+            # Functions already wired in the first script may have renamed terminals: a 1-D Index
+            # Array's "index (row)" is "index" once its array is wired. Use the names they have now.
+            for ref, (src, _, nm) in zip(refs, script.late_refs):
+                if src != "out" or nm in node_terms or f'"{nm}.' not in late.xml:
+                    continue
+                real = {n for _, n in self._owned(target, "Terminal", self._uid_of(ref), names=True)}
+                for term in set(re.findall(rf'"{re.escape(nm)}\.([^"]+)"', late.xml)) - real:
+                    base = term.split(" (")[0]
+                    if base in real:
+                        rename[f'"{nm}.{term}"'] = f'"{nm}.{base}"'
             if rename:
                 xml = late.xml
                 for a, b in rename.items():
@@ -2219,7 +2229,8 @@ class LabVIEW:
             return re.sub(r"[^a-z0-9]", "", x.lower())
         from . import catalog
         labels_of = catalog.load(self.app.ApplicationDirectory)
-        funcs = {n["id"]: n for n in g["nodes"] if n["kind"] == "function" and n.get("function")}
+        funcs = {n["id"]: n for n in g["nodes"] if n["kind"] == "function" and n.get("function")
+                 and n["function"] not in ("Unbundle By Name", "Bundle By Name")}  # element names are the cluster's
         used: dict[str, dict[str, bool]] = {}  # node -> wired label -> is an output
         for w in g["wires"]:
             for e, is_out in [(w.get("from"), True)] + [(t, False) for t in w["to"]]:
