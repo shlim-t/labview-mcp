@@ -990,7 +990,12 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
     vi_edit. New controls then stay off the connector pane unless they ask for a slot."""
     if not isinstance(spec, dict):
         raise SpecError("spec must be an object")
-    unknown = set(spec) - {"controls", "indicators", "wires", "existing", "auto_error_handling", *_CONTENT_KEYS}
+    unknown = set(spec) - {"controls", "indicators", "wires", "existing", "auto_error_handling", "library",
+                           *_CONTENT_KEYS}
+    lib = spec.get("library")
+    if lib is not None and not (isinstance(lib, str) and Path(lib).is_absolute()
+                                and Path(lib).suffix.lower() in (".lvlib", ".lvclass")):
+        raise SpecError("\"library\" is the absolute path of the .lvlib or .lvclass the VI joins")
     if unknown:
         raise SpecError(f"unknown spec keys: {sorted(unknown)}")
     b = _Builder()
@@ -1074,7 +1079,7 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
                 index_modes.append(_index_mode(b, w, idx, labels, edit or bool(existing)))
         if not (isinstance(w, (list, tuple)) and len(w) == 2 and all(isinstance(x, str) for x in w)):
             raise SpecError(f"wire {w!r} must be [\"from\", \"to\"]")
-        if any(_by_ref(b, e) for e in w) or (any(_late_end(b, e) for e in w) and any(
+        if any(_by_ref(b, e) for e in w) or _inode_output(b, w[0]) or (any(_late_end(b, e) for e in w) and any(
                 b.nodes.get(e.partition(".")[0]) is not None and b.nodes[e.partition(".")[0]].kind == "shiftreg"
                 for e in w)):
             # (a Property/Invoke Node or By Name element to a shift register: the late script cannot
@@ -1169,6 +1174,16 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
 
 
 _SR_ELEMENT = re.compile(r"left\[(\d+)\]")
+
+
+def _inode_output(b: _Builder, end: str) -> bool:
+    """A value out of a new Invoke Node (its method's return value or an in/out parameter): each has
+    an input and an output terminal of one name and a script finds the input, so the wire is drawn
+    between terminal references from the output one."""
+    node, _, term = end.partition(".")
+    n = b.nodes.get(node)
+    return (n is not None and n.kind == "inode" and n.bind is None and not b.event_frame(node)
+            and term not in ("", "reference out", "error out"))
 
 
 def _by_ref(b: _Builder, end: str) -> bool:

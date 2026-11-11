@@ -647,13 +647,40 @@ ORDER = ["lvmcp_move", "lvmcp_propwrite", "lvmcp_proplink", "lvmcp_invokelink", 
          "lvmcp_unbnames", "lvmcp_bunnames", "lvmcp_connect", "lvmcp_concat", "lvmcp_indexmode"]
 
 
+# Helpers that wire a method's return value (Open Library's library reference): a script cannot
+# name that terminal, so these are made with vi_create, which wires it by terminal reference.
+_OPEN_LIB = [{"name": "o", "class": "Application", "method": "Open Library"}]
+VC_HELPERS = {
+    # Application.Open Library + Library.Add Item (Name "", Type "VI"): a VI on disk joins a library/class
+    "lvmcp_libadd": {
+        "controls": [{"name": "library", "type": "path"}, {"name": "item", "type": "path"},
+                     {"name": "nm", "type": "string", "label": "Name"}, {"name": "ty", "type": "string", "label": "Type"}],
+        "indicators": [{"name": "e", "type": "error", "label": "error out"}],
+        "invoke_nodes": _OPEN_LIB + [{"name": "a", "class": "Library", "method": "Add Item"}],
+        "wires": [["library", "o.path"], ["o.Open Library", "a.reference"], ["o.error out", "a.error in"],
+                  ["item", "a.Path"], ["nm", "a.Name"], ["ty", "a.Type"], ["a.error out", "e"]]},
+    # Application.Open Library + Library.Save: save a library/class where it is
+    "lvmcp_libsave": {
+        "controls": [{"name": "library", "type": "path"}],
+        "indicators": [{"name": "e", "type": "error", "label": "error out"}],
+        "invoke_nodes": _OPEN_LIB + [{"name": "s", "class": "Library", "method": "Save"}],
+        "wires": [["library", "o.path"], ["o.Open Library", "s.reference"], ["o.error out", "s.error in"],
+                  ["s.error out", "e"]]},
+}
+
+
 def main(args: list[str]) -> None:
     out = SRC
     if args[:1] == ["--out"]:
         out, args = Path(args[1]), args[2:]
     lv = LabVIEW()
-    for name in args or ORDER:
-        res = lv.call(build_helper, lv, out / f"{name}.vi", HELPERS[name]).result()
+    for name in args or ORDER + list(VC_HELPERS):
+        if name in VC_HELPERS:
+            res = lv.vi_create(str(out / f"{name}.vi"), VC_HELPERS[name], True, "")
+            if res["exec_state"] == "bad (broken)":
+                raise LabVIEWError(f"{name} is broken: {res.get('errors')}")
+        else:
+            res = lv.call(build_helper, lv, out / f"{name}.vi", HELPERS[name]).result()
         print(f"{name}: {res['path']}")
 
 

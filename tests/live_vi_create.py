@@ -614,7 +614,31 @@ def dfir_roundtrip():
     return problems
 
 
-CHECKS = {"broken_errors": broken_errors, "dfir_roundtrip": dfir_roundtrip}
+def library_member():
+    """"library": the new VI joins a library (here a bare .lvlib), which is saved listing it, and
+    vi_dump reports the library it belongs to."""
+    lib = os.path.join(D, "Tools.lvlib")
+    with open(lib, "w", encoding="utf-8") as f:
+        f.write("<?xml version='1.0' encoding='UTF-8'?>\n<Library LVVersion=\"26008000\">\n"
+                "\t<Property Name=\"NI.Lib.Version\" Type=\"Str\">1.0.0.0</Property>\n</Library>\n")
+    p = os.path.join(D, "Square.vi")
+    spec = {"library": lib, "controls": [{"name": "x", "type": "dbl", "default": 3}],
+            "indicators": [{"name": "y", "type": "dbl"}], "functions": [{"name": "m", "function": "Multiply"}],
+            "wires": [["x", "m.x"], ["x", "m.y"], ["m.x*y", "y"]]}
+    res = lv.call(lv.vi_create, p, spec, True, "").result()
+    problems = []
+    if res["exec_state"].startswith("bad"):
+        problems.append(f"vi_create: {res.get('errors')}")
+    if 'Name="Square.vi"' not in open(lib, encoding="utf-8").read():
+        problems.append("the library file does not list the VI")
+    if lv.call(lv.vi_dump, p).result().get("library") != lib:
+        problems.append("vi_dump does not report the library")
+    if lv.call(lv.vi_run, p, {}, None, 10).result()["values"].get("y") != 9.0:
+        problems.append("the VI does not run")
+    return problems
+
+
+CHECKS = {"broken_errors": broken_errors, "dfir_roundtrip": dfir_roundtrip, "library_member": library_member}
 names = sys.argv[1:] or list(CASES) + list(UI_CASES) + list(CHECKS)
 failed = 0
 for name in names:

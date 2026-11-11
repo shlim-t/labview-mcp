@@ -657,8 +657,19 @@ def measure(lv, g: dict, out: Path) -> dict:
         res.update(stage="unsupported", unsupported=["empty diagram"])
         return res
     out.parent.mkdir(parents=True, exist_ok=True)
+    source = g["source"]
     try:
         r = lv.vi_create(str(out), spec, True, "")
+        if r["exec_state"].startswith("bad") and g.get("library") and any(
+                "LabVIEW class" in e["error"] or "scope" in e["error"] for e in r.get("errors", [])):
+            # a class member using what only members may (private data, protected methods): rebuilt
+            # into its class, in memory only (the class is never saved). LabVIEW then cannot compile
+            # it for DFIR, so both are read by walking the diagram.
+            out = out.with_name(out.stem + "_m.vi")
+            r = lv.vi_create(str(out), dict(spec, library=g["library"]), True, "", save_library=False)
+            res["features"] = features + ["class member"]
+            if source != "scan":
+                g, source = lv.vi_dump(g["vi"], "scan"), "scan"
     except Exception as e:
         res.update(stage="create failed", error=str(e)[:300])
         return res
@@ -666,7 +677,7 @@ def measure(lv, g: dict, out: Path) -> dict:
         res["stage"] = "broken"
         res["errors"] = [e["error"] for e in r.get("errors", [])]
     try:
-        g2 = lv.vi_dump(str(out), g["source"])
+        g2 = lv.vi_dump(str(out), source)
     except Exception as e:
         res.update(stage=res.get("stage", "create failed"), error=f"dump of rebuilt VI: {str(e)[:200]}")
         return res

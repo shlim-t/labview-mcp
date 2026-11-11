@@ -285,6 +285,9 @@ async def vi_create(
     Test a UI with vi_run's "actions" (click buttons, set values, read indicators while it runs).
     The new VI has LabVIEW's automatic error handling off, so an unwired error does not open a
     dialog that would block LabVIEW; "auto_error_handling": true in the spec keeps it on.
+    "library": "<absolute .lvclass or .lvlib path>" in the spec makes the new VI a member of that
+    class or library (then saved); a class member may Bundle/Unbundle the class's private data.
+    vi_dump reports the library a VI belongs to as "library".
     Property and Invoke Nodes (top level, in loops, cases and event frames):
       "property_nodes": [{"name": "p", "control": "chart", "properties": ["Visible"], "write": true},
                          {"name": "a", "class": "Application", "properties": ["App.Version"]}],

@@ -412,7 +412,10 @@ class LabVIEW:
                 cache[key] = {}
         return cache[key]
 
-    def vi_create(self, path: str, spec: dict, overwrite: bool, description: str) -> dict:
+    def vi_create(self, path: str, spec: dict, overwrite: bool, description: str,
+                  save_library: bool = True) -> dict:
+        """save_library=False leaves a "library" the VI joined changed only in memory (the
+        measurement rebuilds class members into LabVIEW's own example classes, never saving them)."""
         from . import gen
 
         script = gen.build(spec)  # validates before LabVIEW is touched
@@ -516,6 +519,9 @@ class LabVIEW:
         if description:
             target.Description = description
         target.SaveInstrument(str(p), False, False)
+        if spec.get("library"):
+            self._join_library(p, spec["library"], save_library)
+            target.SaveInstrument(str(p), False, False)  # now saved as a member
         res = {
             "path": str(p),
             "exec_state": EXEC_STATES.get(target.ExecState, target.ExecState),
@@ -823,6 +829,22 @@ class LabVIEW:
                     h.SetControlValue("mode", 1 if want[owner_of[t]] else 0)
                     self._run_checked(h, "setting a loop tunnel's indexing")
 
+    def _join_library(self, vi_path: Path, library: str, save: bool) -> None:
+        """Make the VI a member of a library or class (Library.Add Item), then save the library."""
+        lib = Path(library)
+        if not lib.is_file():
+            raise LabVIEWError(f"library not found: {lib}")
+        h = self._helper(LIBADD_VI)
+        h.SetControlValue("library", str(lib))
+        h.SetControlValue("item", str(vi_path))
+        h.SetControlValue("Name", "")
+        h.SetControlValue("Type", "VI")
+        self._run_checked(h, f"adding the VI to {lib.name}")
+        if save:
+            h = self._helper(LIBSAVE_VI)
+            h.SetControlValue("library", str(lib))
+            self._run_checked(h, f"saving {lib.name}")
+
     def _concatenate(self, target, concats: list, outs: list) -> None:
         """Switch placed Build Arrays to Concatenate Inputs."""
         h, all_refs = self._helper(CONCAT_VI), self._all_of(target, "BuildArray")
@@ -984,7 +1006,7 @@ class LabVIEW:
                         h.GetControlValue("Names") or (), h.GetControlValue("Classes") or (),
                         h.GetControlValue("References") or ()))
 
-        def term(end):
+        def term(end, source=False):
             if end[0] == "tun":  # ("tun", k, j): tunnel k's inner terminal where structure j sits
                 return self._tunnel_inner_by(target, outs[end[1]], outs[end[2]], rows)
             if end[0] == "tunframe":  # ("tunframe", k, j, i): tunnel k's terminal in frame i of case j
@@ -1004,6 +1026,10 @@ class LabVIEW:
                 uid = self._uid_of(outs[k])
                 own = [(n, r) for _, o, n, _, r in sorted(rows, key=lambda x: x[0]) if o == uid]
                 hits = [r for n, r in own if n == name or not name]
+                if len(hits) == 2 and name:
+                    # an Invoke Node parameter (or return value) has an input and an output
+                    # terminal of one name, the output made second
+                    hits = hits[1:] if source else hits[:1]
                 if not hits:  # names differ in case between LabVIEW versions ("time stamp")
                     hits = [r for n, r in own if str(n).lower() == name.lower()]
                 m = re.fullmatch(r"(.*)\[(\d+)\]", name)
@@ -1019,7 +1045,7 @@ class LabVIEW:
         c = self._helper(CONNECT_VI)
         for a, z in ref_wires:
             c.SetControlValue("reference", term(z))
-            c.SetControlValue("other", term(a))
+            c.SetControlValue("other", term(a, source=True))
             self._run_checked(c, f"wiring {_end_text(a)} to {_end_text(z)}")
 
     def _owned(self, target, cls: str, owner: int, names: bool = False) -> list:
@@ -2295,11 +2321,11 @@ class LabVIEW:
                 _try(lambda: self._dfir_flat_types(str(path), g))  # first: it fills in missing labels
                 _try(lambda: self._control_classes(self._vi(str(path)), g))
                 _try(lambda: self._static_vi_targets(self._vi(str(path)), g))
-                return {"vi": str(path), "source": "dfir", **g}
+                return {"vi": str(path), "source": "dfir", **_owning_library(path), **g}
             except LabVIEWError as e:
                 if method == "dfir" or "password-protected" in str(e):
                     raise
-        return {"vi": str(path), "source": "scan",
+        return {"vi": str(path), "source": "scan", **_owning_library(path),
                 "note": "read by walking the diagram objects: constant values are not included, and "
                         "case frames are numbered in creation order",
                 **self._scan(path)}
@@ -2719,6 +2745,8 @@ INPUTCNT_VI = VIS_DIR / "lvmcp_inputcnt.vi"
 STATICVI_VI = VIS_DIR / "lvmcp_staticvi.vi"
 CONCAT_VI = VIS_DIR / "lvmcp_concat.vi"
 INDEXMODE_VI = VIS_DIR / "lvmcp_indexmode.vi"
+LIBADD_VI = VIS_DIR / "lvmcp_libadd.vi"
+LIBSAVE_VI = VIS_DIR / "lvmcp_libsave.vi"
 STATICVIINFO_VI = VIS_DIR / "lvmcp_staticviinfo.vi"
 
 
@@ -2763,6 +2791,28 @@ def _end_text(end) -> str:
     if end[0] == "sr":
         return f"shift register element {end[2]} ({end[3]})"
     return repr(end[2] or end[1])
+
+
+def _owning_library(vi_path) -> dict:
+    """{"library": path} of the .lvclass / .lvlib that lists the VI as a member (read from the library
+    files near it), or {}."""
+    import xml.etree.ElementTree as ET
+    vp = Path(vi_path).resolve()
+    d = vp.parent
+    for _ in range(4):
+        for lib in sorted(list(d.glob("*.lvclass")) + list(d.glob("*.lvlib"))):
+            try:
+                root = ET.parse(lib).getroot()
+            except (ET.ParseError, OSError):
+                continue
+            for it in root.iter("Item"):
+                url = it.get("URL")
+                if it.get("Type") == "VI" and url and (lib / url).resolve() == vp:  # (relative to the file)
+                    return {"library": str(lib)}
+        if d.parent == d:
+            break
+        d = d.parent
+    return {}
 
 
 SRRIGHT_VI = VIS_DIR / "lvmcp_srright.vi"
