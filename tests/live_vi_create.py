@@ -371,6 +371,23 @@ CASES = {
         "wires": [["now.seconds since 1Jan1904", "bw.t0"], ["dt", "bw.dt"], ["y", "bw.Y"],
                   ["bw.output waveform", "gw.waveform"], ["gw.Y", "yo"], ["gw.dt", "dto"], ["gw.t0", "keep.Input"]],
     }, {}, {"yo": [1.0, 2.0, 3.0], "dto": 0.25}),
+    # inputs wired by the names the diagram shows (Compound Arithmetic "value[k]", Reshape Array
+    # "dimension size[k]"), and an Unbundle By Name reading a cluster another one unbundled
+    "diagram_names_and_chain": ({
+        "controls": [{"name": "c", "type": {"cluster": [{"name": "inner", "type": {"cluster": [
+            {"name": "gain", "type": "dbl"}, {"name": "rows", "type": "i32"}]}}, {"name": "x", "type": "dbl"}]},
+            "default": [[2, 2], 5]},
+            {"name": "a", "type": "dbl[]", "default": [1, 2, 3, 4, 5, 6]}],
+        "indicators": [{"name": "sum", "type": "dbl"}, {"name": "m", "type": {"array": "dbl", "dims": 2}}],
+        "constants": [{"name": "three", "type": "i32", "value": 3}, {"name": "one", "type": "dbl", "value": 1}],
+        "functions": [{"name": "u1", "function": "Unbundle By Name"}, {"name": "u2", "function": "Unbundle By Name"},
+                      {"name": "ca", "function": "Compound Arithmetic", "size": 3},
+                      {"name": "rs", "function": "Reshape Array", "size": 4}],
+        "wires": [["c", "u1.input cluster"], ["u1.inner", "u2.input cluster"],
+                  ["u2.gain", "ca.value[1]"], ["u1.x", "ca.value[2]"], ["one", "ca.value[3]"], ["ca.result", "sum"],
+                  ["a", "rs.array"], ["u2.rows", "rs.dimension size[1]"], ["three", "rs.dimension size[2]"],
+                  ["rs.output array", "m"]],
+    }, {}, {"sum": 8.0, "m": [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]}),
     # a Build Array set to Concatenate Inputs joins two arrays into one 1-D array
     "build_array_concatenate": ({
         "controls": [{"name": "a", "type": "dbl[]", "default": [1, 2]}, {"name": "b", "type": "dbl[]", "default": [3]}],

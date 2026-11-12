@@ -341,10 +341,13 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
     grown_index = set()
     for a, b in wires:
         for e in (a, b):
-            m = re.match(r"([^.]+)\.(?:element|value|string|error in)\[(\d+)\]$", e)
+            m = re.match(r"([^.]+)\.(?:element|value|string|error in|component array|component element|array)\[(\d+)\]$", e)
             if m:
                 sizes[m.group(1)] = max(sizes[m.group(1)], int(m.group(2)))
-            m = re.match(r"([^.]+)\.(?:element|index)\[(\d+)\]$", e)  # Index Array: size = groups + 2
+            m = re.match(r"([^.]+)\.dimension size\[(\d+)\]$", e)  # Reshape Array: size = 2 x dimensions
+            if m and fn_of.get(m.group(1)) == "Reshape Array":
+                sizes[m.group(1)] = max(sizes[m.group(1)], 2 * int(m.group(2)))
+            m = re.match(r"([^.]+)\.(?:element|subarray|index(?: \((?:row|col)\))?)\[(\d+)\]$", e)  # Index Array: size = groups + 2
             if m and fn_of.get(m.group(1)) in ("Index Array", "ArrayIndexNode"):
                 grown_index.add(m.group(1))
                 sizes[m.group(1)] = max(sizes[m.group(1)], int(m.group(2)) + 2)
@@ -356,7 +359,7 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
     # which a script calls element[2k-1]; index[k] stays (vi_create wires it by terminal reference)
     # Bundle: a script numbers its terminals output cluster 0, cluster 1, elements from 2
     def ia_end(e):
-        m = re.match(r"([^.]+)\.element\[(\d+)\]$", e)
+        m = re.match(r"([^.]+)\.(?:element|subarray)\[(\d+)\]$", e)
         if m and m.group(1) in grown_index:
             return f"{m.group(1)}.element[{2 * int(m.group(2)) - 1}]"
         if m and fn_of.get(m.group(1)) == "Bundle":

@@ -278,7 +278,12 @@ _NODE_KINDS = ("pnode", "inode")
 _SCRIPT_TERM_NONE = {("Insert Into Array", "index"), ("Insert Into Array", "new element/subarray"),
                      ("Replace Array Subset", "new element/subarray"),
                      ("Delete From Array", "array w/ subset deleted")}
-_SCRIPT_TERM_ALIASES = {("Index Array", "index"): "index (row)", ("Replace Array Subset", "index"): "index (row)",
+# a grown node's repeated input "<name>[k]" is the script's element[k + offset] (measured on
+# LabVIEW 2026 by running each: Reshape Array's element[1] is its output array)
+_POSITIONAL = {("Compound Arithmetic", "value"): 0, ("Concatenate Strings", "string"): 0,
+               ("Index & Bundle Cluster Array", "component array"): 0, ("Reshape Array", "dimension size"): 1,
+               ("Build Array", "array"): 0, ("Build Cluster Array", "component element"): 0}
+_SCRIPT_TERM_ALIASES = {("Index Array", "index"): "index (row)", ("Index Array", "subarray"): "element", ("Replace Array Subset", "index"): "index (row)",
                         ("Delete From Array", "index"): "index (row)"}
 _GROWABLE_FUNCS = {"Concatenate Strings", "Build Array", "Bundle", "Unbundle", "Build Cluster Array",
                    "Index Array", "Array Subset", "Replace Array Subset", "Insert Into Array",
@@ -408,6 +413,9 @@ class Script:
     # "control": spec name, "method"}; and the wires to them, drawn after they are configured: `late`
     # (a Script binding its ends) with `late_refs` = ("out", k, name) | ("in", k, name) for each bound object.
     pnodes: list = None
+    # an Unbundle By Name element wired to another By Name node's input cluster: drawn (between
+    # terminal references) once the first is configured, before the second is: [(k, element, k2)]
+    chains: list = None
     late: "Script | None" = None
     late_refs: list = None
     # wires to terminals a script cannot name ("new element/subarray", "number: 0 to 1"), drawn last
@@ -686,6 +694,11 @@ class _Builder:
                 # a bare "element" reference on a growable node has crashed LabVIEW
                 raise SpecError(f"wire end {end!r}: wire growable inputs by position as "
                                 f"\"{node}.element[1]\", \"{node}.element[2]\", ...")
+            m = re.fullmatch(r"(.+?)\s*\[(\d+)\]", term)
+            pos = _POSITIONAL.get((str(n.spec.get("function", "")).strip(), m.group(1))) if m else None
+            if pos is not None:
+                # the diagram names these inputs ("value", "string"); a script knows them by position only
+                return f"{node}.element[{int(m.group(2)) + pos}]"
             alias = _SCRIPT_TERM_ALIASES.get((str(n.spec.get("function", "")).strip(), term))
             return f"{node}.{alias}" if alias else end
         if k in _STRUCT_TERMS:
@@ -1106,7 +1119,26 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
         n.kind == "event" for n in b.nodes.values()) else []
     if events and (edit or existing):
         raise SpecError("event structures can only be made by vi_create for now")
-    pnodes, late, late_refs = _plan_nodes(b, late_raw, labels, ref_raw)
+    # By Name nodes chained element -> input cluster: the second shows its elements only once its
+    # cluster is wired, so that wire is drawn between their configurations
+    def byname_in(e):
+        node, _, term = e.partition(".")
+        n = b.nodes.get(node)
+        return (term == "input cluster" and n is not None and n.kind == "function" and n.bind is None
+                and str(n.spec.get("function", "")).strip() in _BYNAME and not b.event_frame(node))
+    chain_raw = [w for w in late_raw if _byname_elem(b, w[0]) and byname_in(w[1])
+                 and _BYNAME[b.nodes[w[0].partition(".")[0]].spec["function"].strip()] == "unbundle"]
+    late_raw = [w for w in late_raw if w not in chain_raw]
+    pnodes, late, late_refs = _plan_nodes(b, late_raw, labels, list(ref_raw) + chain_raw)
+    chains = []
+    if chain_raw:
+        # configure each By Name node after the one its cluster comes from
+        src_of = {w[1].partition(".")[0]: w[0].partition(".")[0] for w in chain_raw}
+        def depth(nm, seen=()):
+            return 0 if nm not in src_of or nm in seen else 1 + depth(src_of[nm], (*seen, nm))
+        pnodes.sort(key=lambda pn: depth(pn["name"]) if pn["kind"] == "byname" else -1)
+        chains = [(b.out_index[w[0].partition(".")[0]], w[0].partition(".")[2],
+                   b.out_index.setdefault(w[1].partition(".")[0], len(b.out_index))) for w in chain_raw]
 
     # a case output tunnel wired in only some frames gives its type's default in the others
     use_default = []
@@ -1163,7 +1195,7 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
         outs=sorted(b.out_index, key=b.out_index.get),
         events=[dict(e, out=b.out_index[e["name"]]) for e in
                 sorted(events, key=lambda e: b.event_order.index(e["name"]))],
-        pnodes=pnodes, late=late, late_refs=late_refs, ref_wires=ref_wires,
+        pnodes=pnodes, chains=chains, late=late, late_refs=late_refs, ref_wires=ref_wires,
         stacks=sorted((b.out_index[n], k) for n, k in b.sr_stack.items()),
         replaces=replaces,
         static_refs=static_refs,
@@ -1200,7 +1232,10 @@ def _by_ref(b: _Builder, end: str) -> bool:
         return True  # replaced after the script ran: wired between terminal references
     fn = str(n.spec.get("function", "")).strip()
     # a grown Index Array's index terminals have no name a script accepts
-    grown_index = fn == "Index Array" and n.spec.get("size") is not None and re.fullmatch(r"index(\[\d+\])?", term)
+    # (a 2-D one's column index has no name or position a script accepts at all)
+    grown_index = fn == "Index Array" and (
+        (n.spec.get("size") is not None and re.fullmatch(r"index( \((row|col)\))?(\[\d+\])?", term))
+        or re.fullmatch(r"index \(col\)(\[\d+\])?", term))
     return bool(_TERM_BY_REF.search(term)) or (fn, term) in _SCRIPT_TERM_NONE or bool(grown_index)
 
 
@@ -1325,10 +1360,16 @@ def _byname_bridges(b: _Builder, wires: list) -> list:
         for a, z in ((0, 1), (1, 0)):
             node, _, term = w[z].partition(".")
             n = b.nodes.get(node)
-            if not _byname_elem(b, w[a]) or n is None:
+            src = b.nodes.get(w[a].partition(".")[0])
+            pnode = (src is not None and src.kind in _NODE_KINDS and src.bind is None
+                     and not b.event_frame(src.name))  # a Property/Invoke Node's terminals: late too
+            if not (_byname_elem(b, w[a]) or pnode) or n is None:
                 continue
-            grown = (n.kind == "function" and n.bind is None and _GROWN_ELEMENT.fullmatch(term)
-                     and str(n.spec.get("function", "")).strip() in _GROWABLE_FUNCS)
+            fn = str(n.spec.get("function", "")).strip()
+            m = re.fullmatch(r"(.+?)\s*\[\d+\]", term)
+            grown = n.kind == "function" and n.bind is None and (
+                (_GROWN_ELEMENT.fullmatch(term) and fn in _GROWABLE_FUNCS)
+                or (m is not None and (fn, m.group(1)) in _POSITIONAL))
             # nor bind a tunnel: the copy sits next to the By Name node, so the wire to the tunnel
             # leaves from the same diagram
             if grown or n.kind == "tunnel":

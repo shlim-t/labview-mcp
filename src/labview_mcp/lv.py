@@ -420,7 +420,19 @@ class LabVIEW:
 
         script = gen.build(spec)  # validates before LabVIEW is touched
         # functions LabVIEW's scripting cannot place by name (Merge Errors, First Call?, TDMS, ...)
-        unplaceable = frozenset(f for f in _spec_functions(spec) if self.node_terminals(f) is None)
+        unplaceable = {f for f in _spec_functions(spec) if self.node_terminals(f) is None}
+        # some functions placed by name come as an older node lacking terminals the palette's has
+        # (Unflatten From String without "byte order"): placed like the unplaceable ones when wired so
+        for f, terms in _spec_wired_terms(spec).items():
+            if f in gen._BYNAME:  # (their element terminals are the cluster's, shown once configured)
+                continue
+            have = {n for n, _ in self.node_terminals(f) or ()}
+            missing = {t for t in terms if t not in have and not re.search(r"\[\d+\]$", t)}
+            if f not in unplaceable and have and missing:
+                full = {n for n, _ in self.replaced_terminals(f) or ()}
+                if missing & full - have:
+                    unplaceable.add(f)
+        unplaceable = frozenset(unplaceable)
         if unplaceable:
             script = gen.build(spec, replace=unplaceable)
         # copied class types ({"flat": ..., "from": VI}) need their classes in memory: keep the VIs
@@ -584,6 +596,12 @@ class LabVIEW:
                                      "of the wired cluster's elements?)")
                 node_terms[pn["name"]] = [n for _, n in sorted(self._owned(target, "Terminal", self._uid_of(ref),
                                                                           names=True))]
+                for k, elem, k2 in script.chains or ():
+                    if k == pn["out"]:  # its element into the next By Name node's cluster, before that one is configured
+                        c = self._helper(CONNECT_VI)
+                        c.SetControlValue("reference", self._named_terminal(target, outs[k2], "input cluster"))
+                        c.SetControlValue("other", self._named_terminal(target, ref, elem))
+                        self._run_checked(c, f"wiring {pn['name']}.{elem} to the next By Name node")
                 continue
             what = f"{'property' if pn['kind'] == 'pnode' else 'invoke'} node {pn['name']!r}"
             if pn["control"]:
@@ -1032,6 +1050,8 @@ class LabVIEW:
                     hits = hits[1:] if source else hits[:1]
                 if not hits:  # names differ in case between LabVIEW versions ("time stamp")
                     hits = [r for n, r in own if str(n).lower() == name.lower()]
+                if not hits and name == "subarray":  # an Index Array's output, as a script names it
+                    hits = [r for n, r in own if n == "element"]
                 m = re.fullmatch(r"(.*)\[(\d+)\]", name)
                 if not hits and m:  # "index[2]": the 2nd terminal named "index", in node order
                     same = [r for n, r in own if n == m.group(1)]
@@ -1047,6 +1067,15 @@ class LabVIEW:
             c.SetControlValue("reference", term(z))
             c.SetControlValue("other", term(a, source=True))
             self._run_checked(c, f"wiring {_end_text(a)} to {_end_text(z)}")
+
+    def _named_terminal(self, target, node_ref, name: str):
+        """The one terminal of a node with this name."""
+        uid = self._uid_of(node_ref)
+        names = dict(self._owned(target, "Terminal", uid, names=True))
+        hits = [r for u, r in self._owned(target, "Terminal", uid) if names.get(u) == name]
+        if len(hits) != 1:
+            raise LabVIEWError(f"no single terminal {name!r} on the node (it has {sorted(map(str, names.values()))})")
+        return hits[0]
 
     def _owned(self, target, cls: str, owner: int, names: bool = False) -> list:
         """(uid, refnum) — or (uid, name) — of the objects of a class whose owner has UID `owner`."""
@@ -2357,6 +2386,12 @@ class LabVIEW:
             if not real:
                 continue
             names = {n for n, _ in real}
+            if any(t not in names for t in terms):
+                # the node placed by name may be an older one lacking terminals (Unflatten From
+                # String): vi_create places the full one when a wire names its terminals, so keep them
+                full = {n for n, _ in self.replaced_terminals(f["function"], f.get("size")) or ()}
+                if full - names and all(t in full for t in terms):
+                    continue
             fx = {}
             def base(x):
                 return norm(x.split("(")[0])
@@ -2762,6 +2797,34 @@ def _spec_functions(spec: dict) -> set:
             for c in (s.get("cases") or []) + (s.get("events") or []):
                 if isinstance(c, dict):
                     out |= _spec_functions(c)
+    return out
+
+
+def _spec_wired_terms(spec: dict) -> dict:
+    """{palette function name: the terminal names wires of the spec give its nodes}, at any depth."""
+    fn, ends = {}, []
+
+    def walk(x):
+        if isinstance(x, dict):
+            if isinstance(x.get("function"), str) and isinstance(x.get("name"), str):
+                fn[x["name"]] = x["function"].strip()
+            for k, v in x.items():
+                if k in ("wires", "pass") and isinstance(v, list):
+                    for w in v:
+                        ends.extend([w.get("from"), w.get("to")] if isinstance(w, dict) else
+                                    w if isinstance(w, (list, tuple)) else [])
+                else:
+                    walk(v)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v)
+    walk(spec)
+    out: dict = {}
+    for e in ends:
+        if isinstance(e, str) and "." in e:
+            node, _, term = e.partition(".")
+            if node in fn:
+                out.setdefault(fn[node], set()).add(term)
     return out
 
 

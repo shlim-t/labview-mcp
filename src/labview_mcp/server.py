@@ -227,7 +227,11 @@ async def vi_create(
       {"name": "cat", "function": "Concatenate Strings", "size": 3} -> inputs cat.element[1..3],
       output cat.concatenated string; Build Array likewise ("appended array"); Unbundle (by
       position, size = number of cluster elements) -> u.cluster in, u.element[i] out; Format Into
-      String with 2 inputs -> "size": 5, wired as fs.input 1, fs.input 2.
+      String with 2 inputs -> "size": 5, wired as fs.input 1, fs.input 2. The names the diagram
+      shows work too: Compound Arithmetic "value[k]", Concatenate Strings "string[k]", Build Array
+      "array[k]", Build Cluster Array "component element[k]", Index & Bundle Cluster Array
+      "component array[k]", Reshape Array "dimension size[k]" (size = 2 x dimensions), a grown
+      2-D Index Array "index (row)[k]" / "index (col)[k]" / "subarray[k]".
       Build Array with "concatenate": true joins array inputs end to end (Concatenate Inputs).
       Unbundle By Name / Bundle By Name: wire the cluster to "u.input cluster" and wire elements by
       name ("u.gain", "b.offset"); the node shows the elements its wires name, in wire order (or set
