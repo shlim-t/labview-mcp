@@ -91,7 +91,7 @@ class LVType:
         flags = 0
         if name:
             flags = 0x40
-            nb = name.encode("utf-8")
+            nb = _lv_text(name)  # (the code page, as for string data)
             if len(nb) > 255:
                 raise SpecError(f"name too long: {name}")
             body += bytes([len(nb)]) + nb
@@ -404,6 +404,8 @@ class Script:
     connector: dict[str, str]  # front-panel label -> connector pane slot
     wires: list = None  # (driver, sink) pairs in LabVIEW terminal syntax
     styles: dict = None  # front-panel label -> palette name to replace the control with
+    relabel: dict = None  # stand-in label -> the real (non-ASCII) one, set last
+    panel: list = None   # [(label, is_indicator)] in spec order: the panel is restacked once restyled
     outs: list = None    # node names whose references the script returns (Obj Refs Out[] order)
     # Event structures, in creation order: {"name", "out": index into outs, "frames": [{"control":
     # label, "event": code, "move": [labels of terminals to move in], "bind": [outer names],
@@ -432,6 +434,9 @@ class Script:
     # Static VI References: [(k, vi path or None, strict)]; pointed at their VI before anything is wired
     # (wires to them are drawn between terminal references: a script cannot name their terminal)
     static_refs: list = None
+    # numeric constants whose value is wider than one digit: their value set again once placed, which
+    # makes LabVIEW size them to their text (a script draws them one digit wide): [(k, type, data)]
+    widen: list = None
     # Build Arrays to switch to Concatenate Inputs (indexes into outs), before anything is wired to them
     concats: list = None
     # loop tunnels whose indexing differs from LabVIEW's default, set once everything is wired:
@@ -440,7 +445,7 @@ class Script:
 
     def has_nodes(self) -> bool:
         return bool(self.pnodes) or bool(self.ref_wires) or bool(self.stacks) or bool(self.use_default) \
-            or bool(self.replaces) or bool(self.static_refs) or bool(self.concats) or bool(self.index_modes) or any(fr["script"] is not None and fr["script"].has_nodes()
+            or bool(self.replaces) or bool(self.static_refs) or bool(self.widen) or bool(self.concats) or bool(self.index_modes) or any(fr["script"] is not None and fr["script"].has_nodes()
                                         for ev in self.events or [] for fr in ev["frames"])
 
 
@@ -879,7 +884,9 @@ class _Builder:
             n = self.nodes[name]
             p = _pos(*pos[name])
             o = self.out_attr(name)
-            if n.kind == "constant":
+            if n.kind in ("control", "indicator"):  # a front-panel terminal placed inside a structure
+                out.append(f"<ControlTerminal controlname={quoteattr(name)} position=\"{p}\"></ControlTerminal>")
+            elif n.kind == "constant":
                 ti = self.add_type(n.spec.get("type", "dbl"), n.spec.get("value"))
                 out.append(f"<Constant name={quoteattr(name)} typeindex=\"{ti}\" position=\"{p}\"{o}></Constant>")
             elif n.kind == "function" and n.spec["function"].strip() in getattr(self, "replace", ()):
@@ -963,6 +970,100 @@ def _fp_height(t: LVType) -> int:
     return 45
 
 
+def _widen(b: "_Builder") -> list:
+    """See Script.widen."""
+    out = []
+    for name, n in b.nodes.items():
+        if n.kind != "constant" or n.bind is not None or b.event_frame(name) or n.spec.get("value") is None:
+            continue
+        try:
+            t = parse_type(n.spec.get("type", "dbl"))
+        except SpecError:
+            continue
+        v = n.spec["value"]
+        if t.kind in _NUM and not isinstance(v, bool) and isinstance(v, (int, float)) and len(f"{v:g}") > 1:
+            out.append((b.out_index.setdefault(name, len(b.out_index)), t.td(), t.data(v)))
+    return out
+
+
+def _place_terminals(b: "_Builder", spec: dict, controls: list) -> None:
+    """Put a front-panel terminal inside the loop (or case frame in a loop) its wires all go into, as
+    LabVIEW users do: a Stop button read outside its While Loop is read once and the loop never stops,
+    an indicator outside one only shows the last value. "in": "<loop>" / "<case>#<frame>" / "" places
+    it explicitly."""
+    def in_loop(c: str) -> bool:
+        # inside a While Loop and no For Loop: a For Loop's tunnel indexes an array, so a terminal
+        # moved into one would hand its code the whole array instead of one element
+        seen = False
+        while c:
+            owner = b.owner_of[c]
+            if b.nodes[owner].kind == "for":
+                return False
+            seen = seen or b.nodes[owner].kind == "while"
+            c = b.nodes[owner].container
+        return seen
+
+    def end_home(e: str):
+        node, _, term = e.partition(".")
+        n = b.nodes.get(node)
+        if n is None or b.event_frame(node) or (n.kind == "event"):
+            return None
+        if n.kind in ("for", "while"):
+            return node if term.strip().lower() in ("i", "stop", "iteration") else n.container
+        if n.kind in ("shiftreg", "tunnel"):
+            return b.nodes[n.owner].container
+        if n.kind in ("control", "indicator"):
+            return ""
+        return n.container
+
+    ends: dict = {}
+    for w in list(spec.get("wires", []) or []):
+        if isinstance(w, dict) and "indexing" in w:  # a tunnel set on purpose: keep the terminal outside
+            for x in (w.get("from"), w.get("to")):
+                if isinstance(x, str):
+                    ends.setdefault(x.partition(".")[0], []).append("\0")
+        w = [w.get("from"), w.get("to")] if isinstance(w, dict) else w
+        if isinstance(w, (list, tuple)) and len(w) == 2 and all(isinstance(x, str) for x in w):
+            for a, z in ((0, 1), (1, 0)):
+                ends.setdefault(w[a].partition(".")[0], []).append(w[z])
+    fixed = {src.partition(".")[0] for _, _, src, _ in b.case_passes}  # passed through a frame
+    for n in b.nodes.values():  # an event frame's control is read in its frame (see _plan_events)
+        if n.kind == "event":
+            for fr in n.spec.get("events", []) or []:
+                fixed |= {fr.get("control")} | {m.get("control") for m in fr.get("more", []) or []}
+    for c in controls:
+        name = c["name"]
+        if "in" in c:
+            home = c["in"]
+            if home and not (home in b.owner_of and b.nodes[b.owner_of[home]].kind in ("for", "while", "case")
+                             and (home != b.owner_of[home] or b.nodes[home].kind in ("for", "while"))):
+                raise SpecError(f"{name!r}: \"in\" is a For/While Loop's name or \"<case>#<frame index>\" "
+                                f"(or \"\" for the top diagram), not {home!r}")
+        else:
+            homes = {end_home(e) for e in ends.get(name, [])}
+            if name in fixed or len(homes) != 1 or None in homes:
+                continue
+            home = homes.pop()
+            if not home or not in_loop(home):
+                continue
+        if home:
+            b.children[""].remove(name)
+            b.children[home].append(name)
+            b.nodes[name].container = home
+
+
+def _style_height(style) -> int:
+    """Rough height of a restyled front-panel object (a chart is far taller than a numeric), so the
+    objects stacked below it do not overlap it."""
+    s = str(style or "").lower()
+    for key, h in (("chart", 230), ("graph", 230), ("tank", 190), ("thermometer", 190), ("slide", 180),
+                   ("gauge", 150), ("meter", 150), ("knob", 140), ("dial", 140), ("listbox", 140),
+                   ("table", 140), ("string", 60)):
+        if key in s:
+            return h
+    return 0
+
+
 def _assign_connector(controls: list[dict], default="auto") -> dict[str, str]:
     """Front-panel name -> slot. Controls fill the left side then the top, indicators the right side
     then the bottom, in spec order; "connector": "left3" pins a slot, false leaves it unwired."""
@@ -1019,10 +1120,16 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
         b.add_existing(e["name"], e.get("kind", "existing"), i, e.get("spec") or {})
     controls = [dict(c, _ind=False) for c in spec.get("controls", []) or []] + \
                [dict(c, _ind=True) for c in spec.get("indicators", []) or []]
-    labels, defaults, styles = {}, {}, {}
+    labels, defaults, styles, relabel = {}, {}, {}, {}
     for c in controls:
         b.add(c.get("name"), "indicator" if c["_ind"] else "control", "", c)
         labels[c["name"]] = str(c.get("label") or c["name"])
+        if not labels[c["name"]].isascii():
+            # LabVIEW's script reader takes text as UTF-8 while LabVIEW keeps it in the Windows code
+            # page: such a label is made with a stand-in and set through COM once everything is built
+            stand_in = f"lvmcp_label_{len(relabel)}"
+            relabel[stand_in] = labels[c["name"]]
+            labels[c["name"]] = stand_in
         if c.get("style") is not None:
             st = c["style"]
             if not isinstance(st, str) or not st.strip() or _TERM_BAD.search(st):
@@ -1036,6 +1143,9 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
             # an enum's value goes through COM as its item index
             defaults[labels[c["name"]]] = t.enum_index(c["default"]) if t.kind == "enum" else c["default"]
     b.collect(spec, "")
+    if not (edit or existing):
+        _place_terminals(b, spec, controls)
+    widen = _widen(b) if not (edit or existing) else []
     b.replace = replace
     replaces = []
     for nm, n in b.nodes.items():
@@ -1171,14 +1281,13 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
         ti = b.add_type(c.get("type", "dbl"), c.get("default"))
         n = c["name"]
         fp = (fp_origin[0] + (320 if c["_ind"] else 0), fp_y[c["_ind"]])
-        fp_y[c["_ind"]] += _fp_height(parse_type(c.get("type", "dbl"))) + 25
+        fp_y[c["_ind"]] += max(_fp_height(parse_type(c.get("type", "dbl"))), _style_height(c.get("style"))) + 25
         out.append(f"<Control name={quoteattr(n)} typeindex=\"{ti}\""
                    + (" indicator=\"TRUE\"" if c["_ind"] else "")
                    + f" label={quoteattr(labels[n])}"
                    + (f" conpaneidx=\"{CONPANE_SLOTS[conpane[n]]}\"" if n in conpane else "")
                    + f" position=\"{_pos(*fp)}\"{b.out_attr(n)}></Control>")
-        out.append(f"<ControlTerminal controlname={quoteattr(n)} position=\"{_pos(*pos[n])}\"></ControlTerminal>")
-    b.emit("", pos, wires, out)
+    b.emit("", pos, wires, out)  # (front-panel terminals with the contents of their diagram)
     # LabVIEW's scripting resolves a wire from its sink: source = where data goes, destination = driver.
     for a, z in wires:
         out.append(f"<Wire source={quoteattr(z)} destination={quoteattr(a)}></Wire>")
@@ -1192,10 +1301,12 @@ def build(spec: dict, existing: list | None = None, origin=(30, 30), fp_origin=(
         connector={labels[n]: slot for n, slot in conpane.items()},
         wires=wires,
         styles=styles,
+        panel=[(labels[c["name"]], c["_ind"]) for c in controls],
+        relabel=relabel,
         outs=sorted(b.out_index, key=b.out_index.get),
         events=[dict(e, out=b.out_index[e["name"]]) for e in
                 sorted(events, key=lambda e: b.event_order.index(e["name"]))],
-        pnodes=pnodes, chains=chains, late=late, late_refs=late_refs, ref_wires=ref_wires,
+        widen=widen, pnodes=pnodes, chains=chains, late=late, late_refs=late_refs, ref_wires=ref_wires,
         stacks=sorted((b.out_index[n], k) for n, k in b.sr_stack.items()),
         replaces=replaces,
         static_refs=static_refs,

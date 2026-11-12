@@ -467,6 +467,17 @@ HELPERS["lvmcp_setpos"] = {
     "nodes": [{"name": "w", "kind": "property", "class": "GObject", "items": ["Position"], "write": True}],
     "wires": [("reference", "w.reference"), ("position", "w.Position"), ("w.error out", "error out")],
 }
+# GObject.Position + Bounds (read): where a front-panel object is and how big it really is (a control
+# restyled as a chart is far bigger than the numeric it replaced), to stack the panel without overlaps
+HELPERS["lvmcp_bounds"] = {
+    "controls": [("reference", "ref:GObject")],
+    "indicators": [("position", {"cluster": [{"name": "Left", "type": "i32"}, {"name": "Top", "type": "i32"}]}),
+                   ("bounds", {"cluster": [{"name": "Area Width", "type": "i32"}, {"name": "Area Height", "type": "i32"}]}),
+                   ("error out", "error")],
+    "nodes": [{"name": "r", "kind": "property", "class": "GObject", "items": ["Position", "Bounds"]}],
+    "wires": [("reference", "r.reference"), ("r.Position", "position"), ("r.Bounds", "bounds"),
+              ("r.error out", "error out")],
+}
 # VI.Automatic Error Handling (write): off for generated VIs, so an unwired error does not open a
 # modal dialog (which blocks LabVIEW and hangs vi_run)
 HELPERS["lvmcp_autoerr"] = {
@@ -644,7 +655,7 @@ ORDER = ["lvmcp_move", "lvmcp_propwrite", "lvmcp_proplink", "lvmcp_invokelink", 
          "lvmcp_allprops", "lvmcp_signal", "lvmcp_fire", "lvmcp_timeoutterm", "lvmcp_eventsel", "lvmcp_termconst", "lvmcp_outcnt", "lvmcp_consttype", "lvmcp_ctltype", "lvmcp_termind", "lvmcp_termctl", "lvmcp_conpane", "lvmcp_subvipath", "lvmcp_relabel", "lvmcp_constvalue",
          "lvmcp_rep", "lvmcp_constrep", "lvmcp_casenames", "lvmcp_setcasenames",
          "lvmcp_removeframe", "lvmcp_setpos", "lvmcp_autoerr", "lvmcp_pnodeinfo", "lvmcp_inodeinfo", "lvmcp_propitemset", "lvmcp_propitems", "lvmcp_itemterm",
-         "lvmcp_unbnames", "lvmcp_bunnames", "lvmcp_connect", "lvmcp_concat", "lvmcp_indexmode"]
+         "lvmcp_unbnames", "lvmcp_bunnames", "lvmcp_connect", "lvmcp_concat", "lvmcp_indexmode", "lvmcp_bounds"]
 
 
 # Helpers that wire a method's return value (Open Library's library reference): a script cannot

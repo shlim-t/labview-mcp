@@ -499,11 +499,22 @@ class LabVIEW:
                         raise LabVIEWError("setting a case tunnel to Use Default if Unwired: tunnel not found")
                     ud.SetControlValue("reference", sel[tun])
                     self._run_checked(ud, "setting a case tunnel to Use Default if Unwired")
+            if script.widen:  # numeric constants sized to their value (a script draws them one digit wide)
+                from win32com.client import VARIANT
+                h = self._helper(CONSTVALUE_VI)
+                arr = pythoncom.VT_ARRAY | pythoncom.VT_UI1
+                for k, ts, ds in script.widen:
+                    h.SetControlValue("reference", out_refs[k])
+                    h.SetControlValue("type string", VARIANT(arr, ts))
+                    h.SetControlValue("data string", VARIANT(arr, ds))
+                    self._run_checked(h, "sizing a constant to its value")
             if script.index_modes:
                 self._set_index_modes(target, script.index_modes, out_refs)
             rest = {k: v for k, v in (script.styles or {}).items() if k not in early}
             if rest:
                 self._apply_styles(target, rest)
+            if script.styles:  # restyled objects (a chart, a knob) are bigger: stack them by real size
+                _try(lambda: self._restack_panel(target, script.panel or []))
             if later:
                 status, code, source = self._gen_script(target, "<Script>\n</Script>", [], [])  # Clean Up
         except LabVIEWError as e:
@@ -519,6 +530,8 @@ class LabVIEW:
                     raise LabVIEWError(f"cannot set default of '{label}' to {value!r}: {_com_msg(e)}") from None
             target._FlagAsMethod("MakeCurValueDefault")
             target.MakeCurValueDefault()
+        if script.relabel:  # non-ASCII labels: stand-ins until now (see gen.build)
+            self._relabel(target, script.relabel)
         _try(lambda: setattr(target, "FPWinTitle", p.stem))  # blank template carries its own title
         # LabVIEW's automatic error handling turns an unwired error into a modal dialog, which blocks
         # LabVIEW (and vi_run) until someone clicks it: off unless the spec asks for it
@@ -538,8 +551,8 @@ class LabVIEW:
             "path": str(p),
             "exec_state": EXEC_STATES.get(target.ExecState, target.ExecState),
             **({"errors": self.vi_errors(target)} if target.ExecState == 0 else {}),
-            "front_panel": script.labels,
-            "connector_pane": script.connector,
+            "front_panel": {k: (script.relabel or {}).get(v, v) for k, v in script.labels.items()},
+            "connector_pane": {(script.relabel or {}).get(k, k): v for k, v in (script.connector or {}).items()},
             "script_xml": script.xml,
         }
         if script.events:
@@ -561,6 +574,13 @@ class LabVIEW:
     def _gen_script(self, target, xml: str, type_strings: list[bytes], data_strings: list[bytes],
                     refs=(), raw: bool = False):
         """raw=True uses the helper without Clean Up Diagram (edits keep the user's layout)."""
+        if not xml.isascii():
+            # LabVIEW reads the script as UTF-8 but keeps text in the Windows code page: such text
+            # comes out garbled, or the whole script is dropped without an error
+            odd = sorted({c for c in xml if not c.isascii()})
+            raise LabVIEWError(f"text with characters outside ASCII ({''.join(odd[:10])}) is supported in "
+                               "control and indicator labels only for now (use ASCII for names, case "
+                               "values, ...; string constants may hold any text)")
         boot = self._helper(RAW_GEN_VI if raw else BOOTSTRAP_VI)
         boot.SetControlValue("reference", target)
         boot.SetControlValue("XML Script Commands", xml)
@@ -1146,6 +1166,39 @@ class LabVIEW:
                     "LabVIEW's Controls palette for an object of the same data type, e.g. \"Stop Button\", "
                     "\"OK Button\", \"Round LED\", \"Vertical Toggle Switch\" for booleans; \"Knob\", "
                     "\"Gauge\", \"Thermometer\", \"Waveform Chart\" for numbers.")
+
+    def _relabel(self, target, relabel: dict) -> None:
+        """Front-panel objects renamed from stand-in labels to their real ones (through COM, which
+        hands LabVIEW the text in its own code page)."""
+        fp = self._fp_refs_by_label(target)
+        h = self._helper(RELABEL_VI)
+        for stand_in, real in relabel.items():
+            if stand_in in fp:
+                h.SetControlValue("reference", fp[stand_in])
+                h.SetControlValue("text", real)
+                self._run_checked(h, f"labelling {real!r}")
+
+    def _restack_panel(self, target, panel: list) -> None:
+        """Controls in a left column and indicators in a right one, in spec order, each placed below
+        the previous by its real size (label included)."""
+        fp = self._fp_refs_by_label(target)
+        h, mv = self._helper(BOUNDS_VI), self._helper(SETPOS_VI)
+        size = {}
+        for label, _ in panel:
+            if label in fp:
+                h.SetControlValue("reference", fp[label])
+                self._run_checked(h, f"reading the size of {label!r}")
+                size[label] = h.GetControlValue("bounds")
+        left = max([size[lb][0] for lb, ind in panel if lb in size and not ind] or [0])
+        for ind in (False, True):
+            x, y = (30 + left + 60 if ind and left else 30), 30
+            for label, i in panel:
+                if i != ind or label not in size:
+                    continue
+                mv.SetControlValue("reference", fp[label])
+                mv.SetControlValue("position", (x, y + 20))  # (the label sits above the position)
+                self._run_checked(mv, f"placing {label!r}")
+                y += size[label][1] + 25
 
     def _event_frame_diagrams(self, target, uids: bool = False) -> list[list]:
         """Diagram refnums of every event frame: one list per event structure in creation order,
@@ -1906,8 +1959,9 @@ class LabVIEW:
                 refs.append(self._ref_for_uid(target, how[1], how[2]))
 
         before = self._sink_count(path)
-        if script.xml.strip() == "<Script>\n</Script>":  # only removals
+        if script.xml.strip() == "<Script>\n</Script>":  # only removals or value changes
             status, code, source = False, 0, ""
+            self._gen_out = []
         else:
             status, code, source = self._gen_script(target, script.xml, script.type_strings,
                                                     script.data_strings, refs=refs, raw=True)
@@ -1991,11 +2045,14 @@ class LabVIEW:
         if script.defaults:
             target._FlagAsMethod("MakeCurValueDefault")
             target.MakeCurValueDefault()
+        if script.relabel:
+            self._relabel(target, script.relabel)
         target.SaveInstrument(path, False, False)
         return {"path": path, "backup": str(bak) if bak else None,
                 "exec_state": EXEC_STATES.get(target.ExecState, target.ExecState),
                 **({"errors": errors} if broken else {}),
-                "removed": removed, "added_front_panel": script.labels,
+                "removed": removed,
+                "added_front_panel": {k: (script.relabel or {}).get(v, v) for k, v in script.labels.items()},
                 **({"disconnected": len(cut_wires)} if cut_wires else {}), **changed}
 
     @staticmethod
@@ -2893,6 +2950,7 @@ INODEINFO_VI = VIS_DIR / "lvmcp_inodeinfo.vi"
 SETCASENAMES_VI = VIS_DIR / "lvmcp_setcasenames.vi"
 REMOVEFRAME_VI = VIS_DIR / "lvmcp_removeframe.vi"
 SETPOS_VI = VIS_DIR / "lvmcp_setpos.vi"
+BOUNDS_VI = VIS_DIR / "lvmcp_bounds.vi"
 AUTOERR_VI = VIS_DIR / "lvmcp_autoerr.vi"
 RELABEL_VI = VIS_DIR / "lvmcp_relabel.vi"
 CONSTVALUE_VI = VIS_DIR / "lvmcp_constvalue.vi"

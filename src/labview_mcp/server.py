@@ -259,6 +259,10 @@ async def vi_create(
     Front-panel look: "style" on a control/indicator replaces it with that Controls-palette object of
     the same data type: bool "Stop Button", "OK Button", "Round LED", "Vertical Toggle Switch"; numeric
     "Knob", "Gauge", "Thermometer", "Vertical Pointer Slide", "Waveform Chart" (dbl indicator).
+    Restyled objects are restacked by their real size so none overlap. Labels may use any language.
+    A control/indicator wired only inside a While Loop gets its terminal inside it (a Stop button
+    read outside its loop would be read once); "in": "<loop>" / "<case>#<frame>" / "" places it
+    explicitly. A For Loop keeps outside terminals (its tunnels index arrays).
     User interfaces: an event structure, usually inside a while loop, runs one frame per user event:
       {"name": "E", "type": "event", "events": [
           {"control": "stop"},                                   # "event" defaults to "Value Change"

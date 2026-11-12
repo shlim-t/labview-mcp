@@ -388,6 +388,13 @@ CASES = {
                   ["a", "rs.array"], ["u2.rows", "rs.dimension size[1]"], ["three", "rs.dimension size[2]"],
                   ["rs.output array", "m"]],
     }, {}, {"sum": 8.0, "m": [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]}),
+    # labels outside ASCII (Korean, a degree sign): made with stand-ins, set through COM at the end
+    "non_ascii_labels": ({
+        "controls": [{"name": "x", "type": "dbl", "label": "온도 (°C)", "style": "Knob", "default": 3}],
+        "indicators": [{"name": "y", "type": "dbl", "label": "결과"}],
+        "functions": [{"name": "a", "function": "Increment"}],
+        "wires": [["x", "a.x"], ["a.x+1", "y"]],
+    }, {"온도 (°C)": 5}, {"결과": 6.0}),
     # a Build Array set to Concatenate Inputs joins two arrays into one 1-D array
     "build_array_concatenate": ({
         "controls": [{"name": "a", "type": "dbl[]", "default": [1, 2]}, {"name": "b", "type": "dbl[]", "default": [3]}],
@@ -655,7 +662,48 @@ def library_member():
     return problems
 
 
-CHECKS = {"broken_errors": broken_errors, "dfir_roundtrip": dfir_roundtrip, "library_member": library_member}
+def stop_in_loop():
+    """A Stop button and an indicator wired only inside a While Loop get their terminals inside it (a
+    Stop read outside is read once: the loop would never stop); a restyled chart is restacked so no
+    two front-panel objects overlap; a constant is sized to its value."""
+    from labview_mcp import lv as lv_mod
+    p = os.path.join(D, "stop_in_loop.vi")
+    spec = {"controls": [{"name": "stop", "type": "bool", "label": "STOP", "style": "Stop Button"},
+                         {"name": "lim", "type": "dbl", "label": "Limit", "style": "Knob", "default": 3}],
+            "indicators": [{"name": "c", "type": "dbl", "label": "Chart", "style": "Waveform Chart"},
+                           {"name": "n", "type": "i32", "label": "Count"}],
+            "structures": [{"name": "W", "type": "while_loop", "functions": [{"name": "w", "function": "Wait (ms)"},
+                                                                             {"name": "m", "function": "Multiply"}],
+                            "constants": [{"name": "ms", "type": "u32", "value": 20}]}],
+            "wires": [["stop", "W.stop"], ["W.i", "n"], ["W.i", "m.x"], ["lim", "m.y"], ["m.x*y", "c"],
+                      ["ms", "w.milliseconds to wait"]]}
+    lv.call(lv.vi_create, p, spec, True, "").result()
+    g = lv.call(lv.vi_dump, p, "scan").result()
+    inside = {x["label"]: x.get("in", "") for x in g["nodes"] if x["kind"] in ("control", "indicator")}
+    if not (inside["STOP"] and inside["Count"] and inside["Chart"]):
+        return [f"terminals not inside the loop: {inside}"]
+    r = lv.call(lv.vi_run, p, {}, None, 10, [{"wait": 0.4}, {"read": ["Count"]}, {"click": "STOP"}]).result()
+    if not r["completed"] or not r["actions"][1]["read"]["Count"]:
+        return [f"the loop did not count or stop: {r}"]
+    boxes = []
+    def go():
+        t = lv._vi(p)
+        h = lv._helper(lv_mod.BOUNDS_VI)
+        for label, ref in lv._fp_refs_by_label(t).items():
+            h.SetControlValue("reference", ref)
+            h.Run(False)
+            (x, y), (w, hh) = h.GetControlValue("position"), h.GetControlValue("bounds")
+            boxes.append((label, x, y - 20, x + w, y - 20 + hh))
+    lv.call(go).result()
+    for i, a in enumerate(boxes):
+        for b in boxes[i + 1:]:
+            if a[1] < b[3] and b[1] < a[3] and a[2] < b[4] and b[2] < a[4]:
+                return [f"front-panel objects overlap: {a} {b}"]
+    return []
+
+
+CHECKS = {"broken_errors": broken_errors, "dfir_roundtrip": dfir_roundtrip, "library_member": library_member,
+          "stop_in_loop": stop_in_loop}
 names = sys.argv[1:] or list(CASES) + list(UI_CASES) + list(CHECKS)
 failed = 0
 for name in names:

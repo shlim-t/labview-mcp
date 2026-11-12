@@ -119,6 +119,9 @@ def to_spec(g: dict, catalog: dict | None = None) -> tuple[dict, list[str], list
                     features.add("control style")
                 if where:
                     features.add("terminal inside a structure")
+                owner = next((m for m in g["nodes"] if m["id"] == where.split("#")[0]), {}) if where else {}
+                if g.get("source") == "scan" and not str(owner.get("kind", "")).startswith("event"):
+                    c["in"] = where  # where the terminal sits ("" = the top diagram); event frames move their own
                 (controls if k == "control" else indicators).append(c)
             elif k == "constant":
                 features.add("constant")
