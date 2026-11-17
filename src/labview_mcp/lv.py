@@ -18,9 +18,16 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 
-import pythoncom
-import pywintypes
-import win32com.client
+try:
+    import pythoncom
+    import pywintypes
+    import win32com.client
+except ImportError:  # not Windows: the server still starts and lists its tools, but every call
+    pythoncom = win32com = None  # that needs LabVIEW reports that it needs Windows + LabVIEW
+
+    class pywintypes:  # noqa: N801 - stands in for the module so "except pywintypes.com_error" works
+        class com_error(Exception):  # noqa: N818
+            pass
 from xml.sax.saxutils import quoteattr
 
 try:  # surface our errors to the agent as normal tool errors, not hidden crashes
@@ -89,7 +96,7 @@ def check_vi_path(path: str) -> str:
 class LabVIEW:
     def __init__(self) -> None:
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="lv-com",
-                                        initializer=pythoncom.CoInitialize)
+                                        initializer=pythoncom.CoInitialize if pythoncom else None)
         self._app = None
         self._tmp = Path(tempfile.mkdtemp(prefix="labview-mcp-"))
 
@@ -113,6 +120,9 @@ class LabVIEW:
     @property
     def app(self):
         if self._app is None:
+            if win32com is None:
+                raise LabVIEWError("labview-mcp needs Windows with NI LabVIEW installed "
+                                   "(it drives LabVIEW through its ActiveX server).")
             try:
                 self._app = win32com.client.dynamic.Dispatch("LabVIEW.Application")
             except pywintypes.com_error as e:
